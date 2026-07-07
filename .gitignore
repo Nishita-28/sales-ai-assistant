@@ -1,0 +1,10 @@
+.venv/
+.env
+__pycache__/
+.pytest_cache/
+vector_store/
+data/private_docs/
+data/approved_docs/
+*.log
+*.tmp
+*.temp

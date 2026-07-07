@@ -1,0 +1,14 @@
+streamlit
+python-dotenv
+pandas
+openpyxl
+pypdf
+python-docx
+python-pptx
+markdown
+chromadb
+sentence-transformers
+openai
+pydantic
+pytest
+ruff
