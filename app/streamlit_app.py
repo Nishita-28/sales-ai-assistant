@@ -1,3 +1,4 @@
+#app/streamlit_app.pystreamlit run app/streamlit_app.py
 import streamlit as st
 
 st.set_page_config(page_title="Internal AI Sales Assistant")
