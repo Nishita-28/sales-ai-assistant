@@ -1,3 +1,4 @@
+#python -m app.chunker "data/approved_docs/MNST_NC11. Catalogue_Auriga (Leak Detector Series).docx"
 from __future__ import annotations
 
 import re
@@ -334,8 +335,16 @@ def chunk_documents(
 # Demo / manual test
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Demo / manual test
+# ---------------------------------------------------------------------------
+
 if __name__ == "__main__":
     import sys
+
+    # Ensure Unicode characters (e.g. ℃) print correctly on Windows.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
 
     # Try to chunk a real file via the existing loader if a path was
     # given on the command line; otherwise fall back to a small
@@ -355,12 +364,18 @@ if __name__ == "__main__":
                 {
                     "type": "heading",
                     "text": "Introduction",
-                    "metadata": {"section_title": "Introduction", "page_number": 1},
+                    "metadata": {
+                        "section_title": "Introduction",
+                        "page_number": 1,
+                    },
                 },
                 {
                     "type": "paragraph",
                     "text": sample_paragraph,
-                    "metadata": {"section_title": "Introduction", "page_number": 1},
+                    "metadata": {
+                        "section_title": "Introduction",
+                        "page_number": 1,
+                    },
                 },
             ],
         }

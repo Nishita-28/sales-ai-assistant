@@ -7,6 +7,7 @@ longer a good reason for the package split. app/loaders/ can be deleted
 once this file replaces it.
 """
 #python -m app.chunker "data/approved_docs/MNST_NC2. Catalogue_PORTaHY H2 LD (Leak Detector Series).docx"
+#python -m app.document_loader "data/approved_docs/MNST_NC11. Catalogue_Auriga (Leak Detector Series).docx"
 
 from __future__ import annotations
 
