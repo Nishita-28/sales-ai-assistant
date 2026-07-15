@@ -8,3 +8,4 @@ data/approved_docs/
 *.log
 *.tmp
 *.temp
+data/chroma_index/
