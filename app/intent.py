@@ -1,27 +1,9 @@
-"""Intent classification for the Internal AI Sales Assistant.
-
-Determines what type of question the user is asking (spec 4.1: "Intent
-classifier -- Classifies user question into product, application,
-compliance, pricing, customer draft, or unknown") before retrieval runs,
-so the retriever and answer generator can apply intent-specific handling
-later if needed -- e.g. routing "document_request" to a file-send flow
-instead of the RAG pipeline, or requiring extra caution on "compliance"
-answers.
-
-Deliberately keyword-based, not an LLM or ML classifier -- fast, free,
-fully deterministic, and easy to audit, which matters for a decision that
-sits this close to the claim guardrail. Expand INTENT_KEYWORDS as real
-usage surfaces new phrasing; no code changes needed to add a keyword,
-just a new list entry.
-"""
 from __future__ import annotations
 
 import re
 from typing import Literal
 
-# Single source of truth for valid intent names -- gives IDE autocomplete
-# on every call site and catches a typo like `return "prodcut"` at
-# development time (via a type checker) instead of silently at runtime.
+
 Intent = Literal[
     "product",
     "application",
@@ -32,12 +14,6 @@ Intent = Literal[
     "unknown",
 ]
 
-# Order matters: classify_intent checks intents in this order and returns
-# the FIRST match. A question can plausibly touch more than one category
-# (e.g. "is the ATEX certified sensor in stock" mentions both compliance
-# and product) -- putting compliance and pricing ahead of the broader
-# application/product categories means a safety- or cost-sensitive
-# question doesn't get miscategorized as an ordinary product question.
 INTENT_KEYWORDS: dict[Intent, list[str]] = {
     "compliance": [
         "certification", "certified", "atex", "iecex", "sil",
@@ -77,40 +53,15 @@ UNKNOWN_INTENT: Intent = "unknown"
 
 
 def _normalize(text: str) -> str:
-    """Lowercases and collapses whitespace so matching is case-insensitive
-    and not thrown off by extra spaces, tabs, or newlines in the input."""
     return re.sub(r"\s+", " ", text.strip().lower())
 
 
 def _contains_keyword(text: str, keyword: str) -> bool:
-    """Whole-word/phrase match against already-normalized text.
-
-    Using a word-boundary regex instead of a plain substring check avoids
-    false positives like "cost" matching inside "accost", and makes a
-    multi-word keyword like "customer reply" match only as that exact
-    phrase, not "customer" and "reply" appearing separately elsewhere in
-    the question.
-    """
     pattern = r"\b" + re.escape(keyword) + r"\b"
     return re.search(pattern, text) is not None
 
 
 def classify_intent(question: str) -> Intent:
-    """Classifies a user's question into one of the intents defined in
-    INTENT_KEYWORDS, or "unknown" if no keyword matches.
-
-    Checks intents in INTENT_KEYWORDS's insertion order and returns the
-    first one with a matching keyword -- see the ordering note above
-    INTENT_KEYWORDS for why compliance/pricing are checked before the
-    broader application/product categories.
-
-    Args:
-        question: the user's raw question text.
-
-    Returns:
-        One of "product", "application", "compliance", "pricing",
-        "customer_draft", "document_request", or "unknown".
-    """
     normalized = _normalize(question)
 
     for intent, keywords in INTENT_KEYWORDS.items():

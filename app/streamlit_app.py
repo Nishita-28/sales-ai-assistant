@@ -1,11 +1,9 @@
 #cd sales-ai-assistant
 #streamlit run app/streamlit_app.py
-"""
-Internal AI Sales Assistant - Streamlit frontend skeleton.
+"""Internal AI Sales Assistant - Streamlit frontend skeleton.
 
-This file only handles UI/layout. Wire it up to your existing
-rag_pipeline.py / retriever.py / claim_checker.py by replacing the
-`fake_answer_question()` stub below with a real call to your backend.
+UI/layout only. Wire it up by replacing fake_answer_question() below
+with a real call into rag_pipeline.py / retriever.py / claim_checker.py.
 """
 
 import html
@@ -19,13 +17,9 @@ import streamlit as st
 APPROVED_DOCS_DIR = Path("data/approved_docs")
 
 def get_admin_password() -> str:
-    """Reads ADMIN_PASSWORD from st.secrets if a secrets.toml exists, else from
-    an environment variable, else falls back to a temporary default so you can
-    test locally without setting anything up.
-
-    TEMPORARY: "admin" is a placeholder for local testing only. Replace it with
-    a real value in .streamlit/secrets.toml (or an Azure App Service application
-    setting) before this ever touches a shared or deployed environment."""
+    """Reads ADMIN_PASSWORD from st.secrets, then env var, then falls back
+    to "admin". TEMPORARY: that fallback is a local-testing placeholder --
+    replace it with a real secret before this touches a shared environment."""
     try:
         return st.secrets["ADMIN_PASSWORD"]
     except (KeyError, FileNotFoundError, st.errors.StreamlitSecretNotFoundError):
@@ -105,12 +99,11 @@ def fake_answer_question(question: str) -> dict:
 def copy_button(text: str, label: str = "Copy answer", key: str = ""):
     # Sanitize the DOM id so it can't break out of the id="..." / JS string it's used in.
     safe_id = "copy-btn-" + re.sub(r"[^a-zA-Z0-9_-]", "", key)
-    # json.dumps gives us a JS-safe quoted string; html.escape then makes that
-    # string safe to sit inside a double-quoted HTML attribute (onclick="...").
+    # json.dumps gives a JS-safe quoted string; html.escape then makes it
+    # safe inside a double-quoted HTML attribute (onclick="...").
     safe_text = html.escape(json.dumps(text))
     safe_label = html.escape(label)
-    # st.iframe renders a raw HTML string the same way components.html used to
-    # (components.html is deprecated as of Streamlit 1.56 and removed after 2026-06-01).
+    # components.html is deprecated as of Streamlit 1.56; st.iframe replaces it.
     st.iframe(
         f"""
         <button id="{safe_id}" onclick="
