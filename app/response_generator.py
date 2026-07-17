@@ -11,6 +11,7 @@ from typing import Any, Optional
 
 from dotenv import load_dotenv
 
+from app.claim_checker import check_restricted_claims
 from app.intent import Intent, UNKNOWN_INTENT
 
 load_dotenv()
@@ -64,7 +65,7 @@ class GeneratedAnswer:
     answer: str
     sources: list[tuple[str, str]]
     confidence: str  # "High" | "Low" -- see _display_confidence (retriever.py has no "Medium" tier)
-    risk: str  # always "Unknown" here -- claim_checker.py decides the real value
+    risk: str  # from claim_checker.py -- one of RESTRICTED_TERM_CATEGORIES' keys, or "None"
     customer_wording: Optional[str]
 
     def to_dict(self) -> dict[str, Any]:
@@ -77,12 +78,17 @@ class GeneratedAnswer:
         }
 
 
-def _unsupported_answer() -> GeneratedAnswer:
+def _unsupported_answer(question: str) -> GeneratedAnswer:
+    # No draft answer or sources exist yet, but the question itself may
+    # still name a restricted topic (e.g. a pricing question with no
+    # matching source) -- scanning it means the risk badge is still
+    # meaningful. source_text="" means any matched term is unsupported.
+    claim_result = check_restricted_claims(question, "", source_text="")
     return GeneratedAnswer(
         answer=NO_SOURCE_MESSAGE,
         sources=[],
         confidence="Low",
-        risk="Unknown",
+        risk=claim_result.category,
         customer_wording=None,
     )
 
@@ -315,7 +321,7 @@ def generate_answer(
     retrieval_confidence = retrieval.get("confidence", "none")
 
     if REQUIRE_SOURCES and (not matches or retrieval_confidence == "none"):
-        return _unsupported_answer()
+        return _unsupported_answer(question)
 
     allow_customer_wording = want_customer_wording and ALLOW_CUSTOMER_FACING_OUTPUT
     system_prompt = _load_system_prompt()
@@ -330,14 +336,27 @@ def generate_answer(
 
     sections = _parse_llm_response(raw_reply)
     answer_text = sections.get("short_answer") or raw_reply.strip() or NO_SOURCE_MESSAGE
+    confidence = _display_confidence(retrieval_confidence)
+
+    # Spec 12.3: scan question + draft answer for restricted-claim terms,
+    # and block customer_wording below unless the retrieved source text
+    # itself backs every matched term -- not based on similarity score, so
+    # a real but low-similarity match isn't wrongly blocked, and a
+    # confidently-retrieved chunk can't launder an answer that goes beyond
+    # what it actually says.
+    source_text = " ".join(m.get("text", "") for m in matches)
+    claim_result = check_restricted_claims(question, answer_text, source_text)
 
     return GeneratedAnswer(
         answer=answer_text,
         sources=_dedupe_sources(matches),
-        confidence=_display_confidence(retrieval_confidence),
-        # claim_checker.py owns real risk detection; never derived here.
-        risk="Unknown",
-        customer_wording=_extract_customer_wording(sections) if allow_customer_wording else None,
+        confidence=confidence,
+        risk=claim_result.category,
+        customer_wording=(
+            _extract_customer_wording(sections)
+            if allow_customer_wording and not claim_result.is_blocked
+            else None
+        ),
     )
 
 
