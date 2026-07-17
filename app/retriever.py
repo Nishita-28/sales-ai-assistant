@@ -33,10 +33,30 @@ EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "text-embedding-3-small")
 EMBED_BATCH_SIZE = 64
 
 # Per spec 12.2: below this similarity, treat retrieval as a miss.
-NO_MATCH_THRESHOLD = float(os.environ.get("RETRIEVER_NO_MATCH_THRESHOLD", 0.35))
+#
+# Calibrated against this project's actual embedding config (OpenAI
+# text-embedding-3-small, cosine space), not a generic default: sampled
+# top-1 similarity for off-topic questions tops out around 0.15, for
+# on-topic-but-genuinely-unsupported questions (e.g. exact pricing, which
+# the docs never cover) around 0.27, and for real, answerable questions
+# starts around 0.37. 0.32 sits in that real gap. Different embedding
+# providers/models have different score distributions -- re-sample before
+# reusing this value elsewhere.
+NO_MATCH_THRESHOLD = float(os.environ.get("RETRIEVER_NO_MATCH_THRESHOLD", 0.32))
 
 # Per spec 12.2: between NO_MATCH_THRESHOLD and this, answer with low confidence.
-LOW_CONFIDENCE_THRESHOLD = float(os.environ.get("RETRIEVER_LOW_CONFIDENCE_THRESHOLD", 0.55))
+#
+# The naive read of the sampled gap here (weak/indirect matches topping out
+# ~0.45, direct hits on approved content starting ~0.58) suggests anywhere
+# in that range works. It doesn't: several catalogues share a near-identical
+# generic "Product Benefits" boilerplate paragraph that acts as a similarity
+# magnet -- e.g. "How is the leak detector packaged for shipping?" (a
+# question the docs don't actually answer) scores 0.5431 against that
+# paragraph alone. A threshold below that would label a non-answer "high
+# confidence", which is the inflation this must NOT do. 0.56 sits just
+# above that confirmed bad match and just below the lowest confirmed direct
+# hit (0.5840). Narrow margin -- re-sample if it starts misclassifying.
+LOW_CONFIDENCE_THRESHOLD = float(os.environ.get("RETRIEVER_LOW_CONFIDENCE_THRESHOLD", 0.56))
 
 _embedder: Optional[SentenceTransformer] = None
 

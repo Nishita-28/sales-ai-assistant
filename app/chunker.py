@@ -5,8 +5,16 @@ import re
 from dataclasses import asdict, dataclass
 from typing import Any, Optional
 
-DEFAULT_CHUNK_SIZE = 400
-DEFAULT_OVERLAP = 50
+# 400/50 (a generic RAG-tutorial default) let the word-count fallback in
+# _chunk_word_stream produce chunks that blend a dozen-plus unrelated spec
+# items from these label/value-dense catalogues -- e.g. one real 409-word
+# chunk covered storage conditions, hazardous-area deployment, batteries,
+# charger, three separate exposure tests, calibration, display, buttons,
+# and alarms, diluting any single fact's embedding into near-irrelevance.
+# 150/20 keeps the same ~13% overlap ratio while capping how many distinct
+# topics a fallback-split chunk can span.
+DEFAULT_CHUNK_SIZE = 150
+DEFAULT_OVERLAP = 20
 
 # When a chunk's word-count cutoff would land mid-sentence, look up to this
 # many words further for a cleaner stopping point (see _find_boundary_end).
@@ -38,7 +46,18 @@ def _table_block_to_text(block: dict[str, Any]) -> str:
     parts: list[str] = []
 
     def _row_text(label: str, values: dict[str, str]) -> str:
-        value_text = ", ".join(f"{k}: {v}" for k, v in values.items() if v)
+        # Variant-column tables (e.g. "Range 1 | Range 2 | Range 3") often
+        # repeat the identical value in every column for a given row --
+        # e.g. this project's Auriga spec table repeats the same "should
+        # not be deployed in a Hazardous Area" text three times over. That
+        # wastes chunk budget on repetition instead of distinct content and
+        # dilutes the row's own embedding. Collapse to one mention when
+        # every column already agrees.
+        unique_values = set(values.values())
+        if len(values) > 1 and len(unique_values) == 1:
+            value_text = next(iter(unique_values))
+        else:
+            value_text = ", ".join(f"{k}: {v}" for k, v in values.items() if v)
         return f"{label}: {value_text}" if value_text else label
 
     if style == "header":
