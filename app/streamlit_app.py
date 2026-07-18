@@ -1,18 +1,27 @@
 #cd sales-ai-assistant
 #streamlit run app/streamlit_app.py
-"""Internal AI Sales Assistant - Streamlit frontend skeleton.
-
-UI/layout only. Wire it up by replacing fake_answer_question() below
-with a real call into rag_pipeline.py / retriever.py / claim_checker.py.
-"""
+"""Internal AI Sales Assistant - Streamlit frontend."""
 
 import html
 import json
 import os
 import re
+import sys
 from pathlib import Path
 
 import streamlit as st
+
+# `streamlit run app/streamlit_app.py` sets sys.path[0] to this file's own
+# directory (app/), not the project root, regardless of the cwd the command
+# was run from -- so the `app.*` imports below would fail with "No module
+# named 'app'" without this, even though every other module in this project
+# resolves them fine (they're run via `python -m app.X`, which puts the cwd
+# on sys.path instead).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from app.rag_pipeline import answer_question
+from app.response_generator import ResponseGeneratorError
+from app.retriever import RetrieverError
 
 APPROVED_DOCS_DIR = Path("data/approved_docs")
 
@@ -62,35 +71,6 @@ RISK_COLORS = {
     "Delivery": ("#FAEEDA", "#854F0B"),
     "Unknown": ("#F1EFE8", "#444441"),
 }
-
-
-# ---------------------------------------------------------------------------
-# Backend stub - replace with a real call into your rag_pipeline
-# ---------------------------------------------------------------------------
-def fake_answer_question(question: str) -> dict:
-    """Placeholder. Replace with e.g. `from app.rag_pipeline import answer_question`."""
-    if "atex" in question.lower():
-        return {
-            "answer": "I do not have approved information confirming ATEX certification. "
-                      "This claim should not be shared externally unless management provides "
-                      "an approved certification document.",
-            "sources": [("restricted_claims.md", "Certification claims")],
-            "confidence": "High",
-            "risk": "Certification",
-            "customer_wording": None,  # blocked
-        }
-    return {
-        "answer": "Yes. Hydrogen leak detection is listed as a target application area. "
-                  "The safe positioning is that the product is being developed for hydrogen "
-                  "sensing and industrial safety monitoring.",
-        "sources": [("product_positioning.md", "Target applications")],
-        "confidence": "High",
-        "risk": "None",
-        "customer_wording": "Our sensing platform is being developed for hydrogen sensing and "
-                             "industrial safety monitoring. Final suitability depends on the gas "
-                             "range, deployment environment, calibration requirements, and "
-                             "certification needs.",
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -215,6 +195,17 @@ if "pending_question" in st.session_state:
 
 if question:
     with st.spinner("Checking approved documents..."):
-        result = fake_answer_question(question)
-    st.session_state.history.append({"question": question, **result})
-    st.rerun()
+        try:
+            result = answer_question(question, want_customer_wording=True)
+        except (RetrieverError, ResponseGeneratorError) as e:
+            st.error(f"Something went wrong answering that question: {e}")
+        else:
+            st.session_state.history.append({
+                "question": question,
+                "answer": result["answer"],
+                "sources": result["sources"],
+                "confidence": result["confidence"],
+                "risk": result["risk_flag"],
+                "customer_wording": result["customer_wording"],
+            })
+            st.rerun()

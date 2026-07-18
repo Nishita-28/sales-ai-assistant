@@ -105,12 +105,24 @@ def _contains_term(text: str, term: str) -> bool:
     return re.search(pattern, text) is not None
 
 
-def _classify_category(text: str) -> tuple[str, list[str]]:
+# "approved"/"approval" are unambiguous when a user asks them ("Is this
+# approved for X?"), but not when they show up in the LLM's OWN answer
+# text: the system prompt requires it to talk about the "approved
+# knowledge base"/"approved information" even when saying it found
+# nothing, so an ordinary "the approved excerpts do not specify X" answer
+# would otherwise falsely trigger Certification on every single
+# unrelated, unsupported-looking answer. Excluded only from answer-text
+# classification below, not from the question.
+ANSWER_TEXT_EXCLUDED_TERMS = {"approved", "approval"}
+
+
+def _classify_category(text: str, exclude: set[str] = frozenset()) -> tuple[str, list[str]]:
     """Returns (category, matched_terms) for the first category (in
-    RESTRICTED_TERM_CATEGORIES order) with any term present in `text`, or
-    (NONE_CATEGORY, []) if nothing restricted was found."""
+    RESTRICTED_TERM_CATEGORIES order) with any term present in `text`
+    (skipping any term in `exclude`), or (NONE_CATEGORY, []) if nothing
+    restricted was found."""
     for category, terms in RESTRICTED_TERM_CATEGORIES.items():
-        matched = [t for t in terms if _contains_term(text, t)]
+        matched = [t for t in terms if t not in exclude and _contains_term(text, t)]
         if matched:
             return category, matched
     return NONE_CATEGORY, []
@@ -146,6 +158,8 @@ def check_restricted_claims(question: str, answer_text: str, source_text: str) -
     restricted-claim terms. The question's category takes priority when
     both are present (it's the more reliable signal of what's actually
     being asked); matched_terms is the union of both, for auditability.
+    ANSWER_TEXT_EXCLUDED_TERMS is skipped when classifying answer_text
+    specifically (see its own docstring).
 
     source_text is the retrieved evidence actually cited as sources for
     this answer (e.g. the concatenated text of retriever.retrieve()'s
@@ -160,7 +174,7 @@ def check_restricted_claims(question: str, answer_text: str, source_text: str) -
     source_norm = _normalize(source_text)
 
     q_category, q_matches = _classify_category(question_norm)
-    a_category, a_matches = _classify_category(answer_norm)
+    a_category, a_matches = _classify_category(answer_norm, exclude=ANSWER_TEXT_EXCLUDED_TERMS)
 
     category = q_category if q_category != NONE_CATEGORY else a_category
     matched_terms = sorted(set(q_matches) | set(a_matches))
@@ -222,6 +236,17 @@ if __name__ == "__main__":
             "Multi Nano Sense provides a warranty against defective parts for "
             "12 months from the date of invoice.",
             "Pricing", False,
+        ),
+        (
+            # Real reported bug: an ordinary "not found" answer's own
+            # boilerplate ("the approved excerpts...") was misread as a
+            # certification claim. Nothing restricted is actually being
+            # asked or claimed here.
+            "What is the weight of the VISION H2 LD device?",
+            "The approved excerpts do not specify the weight of the VISION H2 LD device.",
+            "Product Ordering Information: users can select the variant "
+            "from the options provided in this datasheet.",
+            "None", False,
         ),
         (
             # Per data/restricted_claims.md: this is the MEMS platform's

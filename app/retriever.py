@@ -2,6 +2,7 @@
 
 import hashlib
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any, Optional
@@ -260,6 +261,59 @@ def build_index(chunks: list[dict[str, Any]]) -> int:
 
 
 # ---------------------------------------------------------------------------
+# "List all products" queries (spec 12.2 extension)
+# ---------------------------------------------------------------------------
+# Top-k nearest-neighbor search answers "which chunks best match this
+# text", not "enumerate every product" -- with more distinct products in
+# the corpus than top_k, something is always dropped, and which one is
+# arbitrary (whichever chunks happen to be worded less similarly to the
+# question), not a reflection of which products exist. Detected by keyword
+# pattern rather than similarity, consistent with this project's existing
+# deterministic, keyword-based classification (see intent.py,
+# claim_checker.py) -- "enumerate everything" isn't itself a
+# similarity-driven question.
+_LIST_ALL_PRODUCTS_PATTERNS = [
+    re.compile(r"\ball\b.{0,15}\bproducts?\b", re.IGNORECASE),
+    re.compile(r"\bwhat\b.{0,10}\bproducts?\b.{0,15}\b(available|offer|have|sell|make)\b", re.IGNORECASE),
+    re.compile(r"\bproducts?\s+(lineup|line-up|catalog|catalogue|range|portfolio)\b", re.IGNORECASE),
+    re.compile(r"\blist\b.{0,10}\bproducts?\b", re.IGNORECASE),
+]
+
+
+def _is_list_all_products_query(query: str) -> bool:
+    return any(pattern.search(query) for pattern in _LIST_ALL_PRODUCTS_PATTERNS)
+
+
+def _retrieve_one_per_document(query_embedding: list[list[float]], collection) -> list[dict[str, Any]]:
+    """One best-matching chunk per distinct document instead of a single
+    global top-k, so every indexed product is represented at least once.
+    Reuses the same per-chunk similarity search as retrieve()'s normal
+    path, just partitioned by document via Chroma's `where` filter."""
+    all_metadata = collection.get(include=["metadatas"])["metadatas"]
+    document_names = sorted({m["document_name"] for m in all_metadata})
+
+    matches = []
+    for document_name in document_names:
+        result = collection.query(
+            query_embeddings=query_embedding,
+            n_results=1,
+            where={"document_name": document_name},
+        )
+        if not result["documents"][0]:
+            continue
+        matches.append(
+            {
+                "text": result["documents"][0][0],
+                "metadata": result["metadatas"][0][0],
+                "similarity": 1 - result["distances"][0][0],
+            }
+        )
+
+    matches.sort(key=lambda m: m["metadata"].get("document_name", ""))
+    return matches
+
+
+# ---------------------------------------------------------------------------
 # Retrieval (spec 12.2)
 # ---------------------------------------------------------------------------
 def retrieve(query: str, top_k: int = 5) -> dict[str, Any]:
@@ -285,24 +339,33 @@ def retrieve(query: str, top_k: int = 5) -> dict[str, Any]:
 
     query_embedding = embed_texts([query])
 
-    try:
-        results = collection.query(
-            query_embeddings=query_embedding,
-            n_results=min(top_k, collection_count),
-        )
-    except Exception as e:
-        raise RetrieverError(f"Vector search failed: {e}") from e
+    if _is_list_all_products_query(query):
+        try:
+            matches = _retrieve_one_per_document(query_embedding, collection)
+        except Exception as e:
+            raise RetrieverError(f"Vector search failed: {e}") from e
+    else:
+        try:
+            results = collection.query(
+                query_embeddings=query_embedding,
+                n_results=min(top_k, collection_count),
+            )
+        except Exception as e:
+            raise RetrieverError(f"Vector search failed: {e}") from e
 
-    matches = []
-    for text, metadata, distance in zip(
-        results["documents"][0], results["metadatas"][0], results["distances"][0]
-    ):
-        # Chroma returns cosine distance here (0 = identical); similarity
-        # is the complement, higher is better.
-        similarity = 1 - distance
-        matches.append({"text": text, "metadata": metadata, "similarity": similarity})
+        matches = []
+        for text, metadata, distance in zip(
+            results["documents"][0], results["metadatas"][0], results["distances"][0]
+        ):
+            # Chroma returns cosine distance here (0 = identical); similarity
+            # is the complement, higher is better.
+            similarity = 1 - distance
+            matches.append({"text": text, "metadata": metadata, "similarity": similarity})
 
-    best_similarity = matches[0]["similarity"] if matches else 0.0
+    # max() rather than matches[0]: the list-all-products branch above
+    # orders matches by document name for a readable enumeration, not by
+    # similarity, so the top-ranked match isn't necessarily first anymore.
+    best_similarity = max((m["similarity"] for m in matches), default=0.0)
 
     if not matches or best_similarity < NO_MATCH_THRESHOLD:
         return {"matches": [], "confidence": "none"}

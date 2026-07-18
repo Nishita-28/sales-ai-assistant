@@ -1,26 +1,33 @@
 #python -m app.chunker "data/approved_docs/MNST_NC11. Catalogue_Auriga (Leak Detector Series).docx"
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import asdict, dataclass
 from typing import Any, Optional
 
-# 400/50 (a generic RAG-tutorial default) let the word-count fallback in
-# _chunk_word_stream produce chunks that blend a dozen-plus unrelated spec
-# items from these label/value-dense catalogues -- e.g. one real 409-word
-# chunk covered storage conditions, hazardous-area deployment, batteries,
-# charger, three separate exposure tests, calibration, display, buttons,
-# and alarms, diluting any single fact's embedding into near-irrelevance.
-# 150/20 keeps the same ~13% overlap ratio while capping how many distinct
-# topics a fallback-split chunk can span.
-DEFAULT_CHUNK_SIZE = 150
-DEFAULT_OVERLAP = 20
+# These catalogues are dominated by short, already-atomic "Label: value."
+# list items (e.g. "Weight: Less than 100gms." -- 4 words) inspected
+# directly via document_loader's own block output: a typical Product
+# Features section is 15-16 of these, most 5-15 words each. A pure word-
+# count budget -- even a small one -- still blends several unrelated
+# facts into one chunk if it doesn't know where one fact ends and the next
+# begins. chunk_document() now packs whole blocks (never splitting one)
+# instead of a flat word stream -- see _pack_blocks_into_chunks -- so
+# DEFAULT_CHUNK_SIZE here means "how many whole facts share a chunk", not
+# a raw word ceiling. 50 packs roughly 3-6 short list items together
+# (still one coherent, retrievable cluster) while leaving prose sections
+# (e.g. Warranty's 53-95 word paragraphs) to fall back to sentence-aware
+# slicing, same as before, just at a tighter budget.
+DEFAULT_CHUNK_SIZE = 50
+DEFAULT_OVERLAP = 10
 
 # When a chunk's word-count cutoff would land mid-sentence, look up to this
 # many words further for a cleaner stopping point (see _find_boundary_end).
-SENTENCE_LOOKAHEAD_WORDS = 20
+# Only used by _chunk_word_stream's oversized-single-block fallback now.
+SENTENCE_LOOKAHEAD_WORDS = 10
 
-MIN_TRAILING_CHUNK_WORDS = 30
+MIN_TRAILING_CHUNK_WORDS = 10
 
 
 @dataclass
@@ -37,6 +44,17 @@ class Chunk:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def _document_title(document_name: str) -> str:
+    """Strips the file extension from a filename for use as a chunk-text
+    prefix (see chunk_document). Every catalogue's product name only
+    appears in its filename -- e.g. Vision H2 LD's own document body never
+    mentions "Vision H2 LD" anywhere (its first heading is just "Product
+    Features"), confirmed by inspecting document_loader's block output --
+    so a chunk about that product's weight has nothing in its own text for
+    the embedder to match a query naming the product against."""
+    return os.path.splitext(document_name)[0]
 
 
 def _table_block_to_text(block: dict[str, Any]) -> str:
@@ -100,17 +118,19 @@ def _block_to_text(block: dict[str, Any]) -> str:
 
 def _split_into_boundary_units(document: dict[str, Any]) -> list[dict[str, Any]]:
     """Groups blocks so a section heading or a table always starts a new
-    unit -- the word-count fallback in chunk_document() then can't straddle
-    a heading or split a table row."""
+    unit. Each unit keeps its blocks as separate word-lists (not flattened
+    into one running stream) so chunk_document()'s packing can respect
+    block boundaries -- a list item or paragraph is never split across two
+    chunks; see _pack_blocks_into_chunks."""
     units: list[dict[str, Any]] = []
-    current_words: list[tuple[str, dict[str, Any]]] = []
+    current_blocks: list[list[tuple[str, dict[str, Any]]]] = []
     current_section: Optional[str] = None
 
     def flush() -> None:
-        nonlocal current_words
-        if current_words:
-            units.append({"section_heading": current_section, "words": current_words})
-            current_words = []
+        nonlocal current_blocks
+        if current_blocks:
+            units.append({"section_heading": current_section, "blocks": current_blocks})
+            current_blocks = []
 
     for block in document.get("blocks", []):
         text = _block_to_text(block)
@@ -131,7 +151,7 @@ def _split_into_boundary_units(document: dict[str, Any]) -> list[dict[str, Any]]
             units.append(
                 {
                     "section_heading": word_meta["section_heading"],
-                    "words": [(word, word_meta) for word in text.split()],
+                    "blocks": [[(word, word_meta) for word in text.split()]],
                 }
             )
             continue
@@ -147,8 +167,7 @@ def _split_into_boundary_units(document: dict[str, Any]) -> list[dict[str, Any]]
             "slide_number": meta.get("slide_number"),
             "section_heading": current_section,
         }
-        for word in text.split():
-            current_words.append((word, word_meta))
+        current_blocks.append([(word, word_meta) for word in text.split()])
 
     flush()
     return units
@@ -182,8 +201,9 @@ def _chunk_word_stream(
     chunk_size: int,
     overlap: int,
 ) -> list[list[tuple[str, dict[str, Any]]]]:
-    """Fallback for a boundary unit bigger than chunk_size -- slides a
-    window, preferring a sentence boundary near chunk_size over a hard cut."""
+    """Fallback for a single block bigger than chunk_size on its own
+    (called from _pack_blocks_into_chunks) -- slides a window, preferring
+    a sentence boundary near chunk_size over a hard cut."""
     raw_chunks: list[list[tuple[str, dict[str, Any]]]] = []
     start = 0
     n = len(words)
@@ -205,14 +225,53 @@ def _chunk_word_stream(
     return raw_chunks
 
 
+def _pack_blocks_into_chunks(
+    blocks: list[list[tuple[str, dict[str, Any]]]],
+    chunk_size: int,
+    overlap: int,
+) -> list[list[tuple[str, dict[str, Any]]]]:
+    """Greedily packs whole blocks (list items, paragraphs, or a table's
+    full word list) into chunks up to chunk_size, never splitting one
+    block across two chunks -- this is what keeps a short "Label: value."
+    fact like "Weight: Less than 100gms." intact and undiluted, instead of
+    landing wherever a raw word-count cutoff happens to fall. A single
+    block bigger than chunk_size on its own (e.g. a long prose paragraph)
+    falls back to _chunk_word_stream's sentence-boundary-aware slicing,
+    same as before chunk_document() packed at block granularity."""
+    chunks: list[list[tuple[str, dict[str, Any]]]] = []
+    current: list[tuple[str, dict[str, Any]]] = []
+
+    for block_words in blocks:
+        if not block_words:
+            continue
+        if len(block_words) > chunk_size:
+            if current:
+                chunks.append(current)
+                current = []
+            chunks.extend(_chunk_word_stream(block_words, chunk_size, overlap))
+            continue
+
+        if current and len(current) + len(block_words) > chunk_size:
+            chunks.append(current)
+            current = []
+        current.extend(block_words)
+
+    if current:
+        chunks.append(current)
+
+    return chunks
+
+
 def chunk_document(
     document: dict[str, Any],
     chunk_size: int = DEFAULT_CHUNK_SIZE,
     overlap: int = DEFAULT_OVERLAP,
 ) -> list[Chunk]:
     """Chunks one loaded document into Chunk objects. Boundaries (section
-    headings, tables) are respected first; the word-count sliding window is
-    only a fallback for a unit larger than chunk_size."""
+    headings, tables) are respected first; within a boundary unit, whole
+    blocks are packed up to chunk_size (see _pack_blocks_into_chunks) --
+    the word-count sliding window is only a fallback for a single block
+    larger than chunk_size on its own."""
     boundary_units = _split_into_boundary_units(document)
     if not boundary_units:
         return []
@@ -221,7 +280,7 @@ def chunk_document(
 
     raw_chunks: list[list[tuple[str, dict[str, Any]]]] = []
     for unit in boundary_units:
-        raw_chunks.extend(_chunk_word_stream(unit["words"], chunk_size, overlap))
+        raw_chunks.extend(_pack_blocks_into_chunks(unit["blocks"], chunk_size, overlap))
 
     # A heading describes what follows it, not what precedes it, so a tiny
     # standalone chunk (e.g. a heading with little content under it) gets
@@ -246,10 +305,16 @@ def chunk_document(
         else:
             merged_chunks.append(carry)
 
+    # Prefixed onto every chunk's embedded text (not just stored as
+    # metadata) because retrieval only embeds Chunk.text -- a document's
+    # own product identity has to live in the text itself to affect
+    # similarity, metadata never reaches the embedder. See _document_title.
+    document_title = _document_title(document_name)
+
     total_chunks = len(merged_chunks)
     chunks: list[Chunk] = []
     for index, unit_group in enumerate(merged_chunks):
-        text = " ".join(word for word, _ in unit_group)
+        text = f"{document_title}: " + " ".join(word for word, _ in unit_group)
         first_word_meta = unit_group[0][1]
         chunks.append(
             Chunk(
