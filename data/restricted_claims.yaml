@@ -1,0 +1,154 @@
+# Restricted-claims policy -- the single source of truth for
+# app/claim_checker.py's enforcement. Edit through the Admin page in the
+# running app, not by hand here, unless you're comfortable with YAML: a
+# malformed file makes the assistant refuse to answer any question that
+# needs claim-checking (see app/restricted_policy.py / app/claim_checker.py).
+#
+# Per spec 8.2 and 12.3: the assistant must flag or block these unless
+# explicitly supported by the approved documents for the specific product
+# being discussed.
+#
+# Each entry:
+#   category            one of Certification / Accuracy / Safety / Pricing
+#                       / Delivery / Legal (see restricted_policy.KNOWN_CATEGORIES)
+#   keywords            phrases that trigger this entry (matched as whole
+#                       words/phrases, case-insensitive, tolerant of a
+#                       trailing "s"/"es")
+#   always_unsupported  true if a match should be blocked regardless of
+#                       what the retrieved source text says (a flat denial
+#                       -- e.g. the approved docs describe ATEX as "in
+#                       process", so the word "atex" can appear in genuine
+#                       source text while still not confirming the claim).
+#                       false if a match should be evidence-checked
+#                       normally (blocked only when the retrieved source
+#                       text doesn't actually contain it).
+#   note                human-readable rationale, shown in the Admin UI.
+#
+# Categories are checked in the order they first appear below (first
+# matching category wins) -- keep Certification-related entries first,
+# etc., to preserve that precedence.
+
+- category: Certification
+  keywords: [atex]
+  always_unsupported: true
+  note: >-
+    ATEX certified -- not mentioned in any approved document. Never confirm
+    ATEX certification, and never infer it from adjacent-but-different
+    marks (PESO approval, Ex ia IIC T6 Ga, IS/IEC 60079-series testing are
+    not ATEX certification).
+
+- category: Certification
+  keywords: [iecex]
+  always_unsupported: true
+  note: >-
+    IECEx certified -- not mentioned in any approved document. Same
+    restriction as ATEX.
+
+- category: Certification
+  keywords: [sil, sil-2, sil2]
+  always_unsupported: true
+  note: "SIL / SIL-2 certified -- not documented for any product in the approved corpus."
+
+- category: Certification
+  keywords: ["life-safety", "life safety"]
+  always_unsupported: true
+  note: "Life-safety certified -- not documented for any product."
+
+- category: Certification
+  keywords: ["explosion proof", "explosion-proof"]
+  always_unsupported: true
+  note: >-
+    Explosion-proof (as a formal certification claim) -- distinct from the
+    FIXaHY's approved "flameproof" enclosure rating; do not conflate the two.
+
+- category: Certification
+  keywords: ["ce mark", "ce marking", "ce marked"]
+  always_unsupported: true
+  note: >-
+    CE marking -- not mentioned anywhere in the approved documents. Do not
+    confirm or imply CE compliance.
+
+- category: Certification
+  keywords: ["intrinsically safe"]
+  always_unsupported: false
+  note: >-
+    Intrinsically safe -- only applies to the specific
+    FIXaHY-G/P/E-4220MA-RRNNVVII circuit documented as such. Do not
+    generalize to the whole product line or to the other FIXaHY variant
+    (which has no intrinsic-safety language of its own), and never apply
+    it to AURIGA (explicitly Safe-Area-only).
+
+- category: Certification
+  keywords: [peso, arai, iec, flameproof, "zone 1", "zone 2", "gas group", "ex ia", "hazardous area", "hazardous zone"]
+  always_unsupported: false
+  note: >-
+    PESO / ARAI / any hazardous-area approval for a product or
+    configuration not explicitly documented as approved -- e.g. AURIGA is
+    not hazardous-area approved, and neither is the other FIXaHY catalogue
+    variant ("FIXaHY H2 LD XX") despite sharing the FIXaHY name.
+
+- category: Certification
+  keywords: [certified, certification, approved, approval]
+  always_unsupported: false
+  note: >-
+    General certification/approval language -- worth flagging for review
+    even when it turns out to be well-supported, since an approval is
+    usually scoped to one specific product or configuration and must not
+    be generalized to the whole line.
+
+- category: Accuracy
+  keywords: ["ppm accuracy", accuracy, "100% accurate", "always accurate"]
+  always_unsupported: false
+  note: "ppm-level or absolute accuracy claims not stated in that product's own technical specification table."
+
+- category: Accuracy
+  keywords: ["universal gas detection", "universal detection", "detects any gas"]
+  always_unsupported: false
+  note: >-
+    "Universal" gas detection, or claiming any specific product detects a
+    gas not explicitly listed for it.
+
+- category: Accuracy
+  keywords: [helium, methane, sf6, hydrocarbon, refrigerant]
+  always_unsupported: true
+  note: >-
+    Claiming a currently orderable product can detect helium, methane,
+    SF6, hydrocarbons, or refrigerants. No approved document supports that
+    capability for any current product; every currently orderable product
+    is hydrogen-specific. (Where helium/methane appear at all in the
+    catalogues, it's as a selectable background/interference gas for
+    calibration -- not as a target gas the product detects.)
+
+- category: Accuracy
+  keywords: []
+  always_unsupported: false
+  note: >-
+    KNOWN GAP, not yet enforced: wireless connectivity (LoRa, Wi-Fi,
+    NB-IoT, Bluetooth) as a current product feature is not documented for
+    any product in the approved corpus -- current products document wired
+    interfaces only (RS485, 4-20mA, CAN). This entry has no keywords yet
+    (carried over from before this policy was code-enforced), so it is
+    currently documentation only. Add keywords such as "wireless", "lora",
+    "wi-fi", "nb-iot", "bluetooth" here to start enforcing it.
+
+- category: Safety
+  keywords: ["safe to use", "completely safe", "guaranteed safe", "fail-safe", "failsafe", "no risk of"]
+  always_unsupported: false
+  note: "Absolute safety guarantees not qualified by the product's actual documented scope."
+
+- category: Pricing
+  keywords: [price, pricing, quotation, quote, cost, discount, warranty]
+  always_unsupported: false
+  note: >-
+    Final price, discount, or a warranty term different from the published
+    12-month standard warranty.
+
+- category: Delivery
+  keywords: [delivery, "lead time", "guaranteed delivery", "ship date", "shipping date"]
+  always_unsupported: false
+  note: "Guaranteed delivery date or lead time -- none is published; do not invent one."
+
+- category: Legal
+  keywords: [legal, regulatory, liability, indemnif, "compliance guarantee"]
+  always_unsupported: false
+  note: "Any regulatory or legal compliance guarantee beyond what's explicitly documented."

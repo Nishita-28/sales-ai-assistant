@@ -19,6 +19,7 @@ import streamlit as st
 # on sys.path instead).
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from app.admin_page import render_admin_page
 from app.rag_pipeline import answer_question
 from app.response_generator import ResponseGeneratorError
 from app.retriever import RetrieverError
@@ -118,14 +119,11 @@ with st.sidebar:
     st.info("Claim guardrail: ON")
     st.warning("Mode: Internal only")
 
-    with st.expander("Admin: upload / reindex"):
+    with st.expander("Admin sign-in"):
         if not ADMIN_PASSWORD:
             st.error("ADMIN_PASSWORD is not set. Add it to secrets before deploying.")
         elif st.session_state.admin_authenticated:
-            st.caption("Signed in as admin.")
-            uploaded = st.file_uploader("Add approved document", type=["docx", "pdf", "pptx", "csv", "md"])
-            if st.button("Rebuild index"):
-                st.toast("Index rebuild triggered (wire this to rag_pipeline --reindex)")
+            st.caption("Signed in as admin -- see the Admin page.")
             if st.button("Sign out"):
                 st.session_state.admin_authenticated = False
                 st.rerun()
@@ -142,70 +140,82 @@ with st.sidebar:
 
 
 # ---------------------------------------------------------------------------
-# Main area
+# Assistant page
 # ---------------------------------------------------------------------------
-st.title("Internal AI Sales Assistant")
-st.caption("Answers only from approved company documents. Always shows sources and confidence.")
+def render_assistant_page() -> None:
+    st.title("Internal AI Sales Assistant")
+    st.caption("Answers only from approved company documents. Always shows sources and confidence.")
 
-# Example question chips for first-time users
-if not st.session_state.history:
-    st.markdown("**Try asking:**")
-    cols = st.columns(len(SAMPLE_QUESTIONS))
-    for col, q in zip(cols, SAMPLE_QUESTIONS):
-        if col.button(q, use_container_width=True):
-            st.session_state.pending_question = q
+    # Example question chips for first-time users
+    if not st.session_state.history:
+        st.markdown("**Try asking:**")
+        cols = st.columns(len(SAMPLE_QUESTIONS))
+        for col, q in zip(cols, SAMPLE_QUESTIONS):
+            if col.button(q, use_container_width=True):
+                st.session_state.pending_question = q
 
-# Render past Q&A as a chat thread
-for turn in st.session_state.history:
-    with st.chat_message("user"):
-        st.write(turn["question"])
-    with st.chat_message("assistant"):
-        bg, fg = RISK_COLORS.get(turn["risk"], RISK_COLORS["Unknown"])
-        badge_html = (
-            f'<span style="font-size:12px;padding:3px 10px;border-radius:6px;'
-            f'background:{bg};color:{fg};margin-right:6px;">Risk: {turn["risk"]}</span>'
-            f'<span style="font-size:12px;padding:3px 10px;border-radius:6px;'
-            f'background:#EAF3DE;color:#3B6D11;">Confidence: {turn["confidence"]}</span>'
-        )
-        st.markdown(badge_html, unsafe_allow_html=True)
-        st.write(turn["answer"])
+    # Render past Q&A as a chat thread
+    for turn in st.session_state.history:
+        with st.chat_message("user"):
+            st.write(turn["question"])
+        with st.chat_message("assistant"):
+            bg, fg = RISK_COLORS.get(turn["risk"], RISK_COLORS["Unknown"])
+            badge_html = (
+                f'<span style="font-size:12px;padding:3px 10px;border-radius:6px;'
+                f'background:{bg};color:{fg};margin-right:6px;">Risk: {turn["risk"]}</span>'
+                f'<span style="font-size:12px;padding:3px 10px;border-radius:6px;'
+                f'background:#EAF3DE;color:#3B6D11;">Confidence: {turn["confidence"]}</span>'
+            )
+            st.markdown(badge_html, unsafe_allow_html=True)
+            st.write(turn["answer"])
 
-        with st.expander("Sources"):
-            for name, section in turn["sources"]:
-                st.markdown(f"- `{name}` — {section}")
+            with st.expander("Sources"):
+                for name, section in turn["sources"]:
+                    st.markdown(f"- `{name}` — {section}")
 
-        copy_button(turn["answer"], "Copy answer", key=f"ans-{turn['question'][:10]}")
+            copy_button(turn["answer"], "Copy answer", key=f"ans-{turn['question'][:10]}")
 
-        if turn["customer_wording"]:
-            with st.expander("Customer-facing wording"):
-                st.write(turn["customer_wording"])
-                copy_button(turn["customer_wording"], "Copy customer wording", key=f"cust-{turn['question'][:10]}")
-        else:
-            st.caption("Customer-facing wording blocked — escalate for review.")
+            if turn["customer_wording"]:
+                with st.expander("Customer-facing wording"):
+                    st.write(turn["customer_wording"])
+                    copy_button(turn["customer_wording"], "Copy customer wording", key=f"cust-{turn['question'][:10]}")
+            else:
+                st.caption("Customer-facing wording blocked — escalate for review.")
 
-        fcol1, fcol2, fcol3 = st.columns(3)
-        fcol1.button("Correct", key=f"ok-{turn['question'][:10]}")
-        fcol2.button("Wrong", key=f"bad-{turn['question'][:10]}")
-        fcol3.button("Unsafe", key=f"unsafe-{turn['question'][:10]}")
+            fcol1, fcol2, fcol3 = st.columns(3)
+            fcol1.button("Correct", key=f"ok-{turn['question'][:10]}")
+            fcol2.button("Wrong", key=f"bad-{turn['question'][:10]}")
+            fcol3.button("Unsafe", key=f"unsafe-{turn['question'][:10]}")
 
-# Question input
-question = st.chat_input("Ask a sales or application question")
-if "pending_question" in st.session_state:
-    question = st.session_state.pop("pending_question")
+    # Question input
+    question = st.chat_input("Ask a sales or application question")
+    if "pending_question" in st.session_state:
+        question = st.session_state.pop("pending_question")
 
-if question:
-    with st.spinner("Checking approved documents..."):
-        try:
-            result = answer_question(question, want_customer_wording=True)
-        except (RetrieverError, ResponseGeneratorError) as e:
-            st.error(f"Something went wrong answering that question: {e}")
-        else:
-            st.session_state.history.append({
-                "question": question,
-                "answer": result["answer"],
-                "sources": result["sources"],
-                "confidence": result["confidence"],
-                "risk": result["risk_flag"],
-                "customer_wording": result["customer_wording"],
-            })
-            st.rerun()
+    if question:
+        with st.spinner("Checking approved documents..."):
+            try:
+                result = answer_question(question, want_customer_wording=True)
+            except (RetrieverError, ResponseGeneratorError) as e:
+                st.error(f"Something went wrong answering that question: {e}")
+            else:
+                st.session_state.history.append({
+                    "question": question,
+                    "answer": result["answer"],
+                    "sources": result["sources"],
+                    "confidence": result["confidence"],
+                    "risk": result["risk_flag"],
+                    "customer_wording": result["customer_wording"],
+                })
+                st.rerun()
+
+
+# ---------------------------------------------------------------------------
+# Navigation -- the Admin page is only added to the page list (and so only
+# reachable/visible) once the sidebar password gate above has passed.
+# ---------------------------------------------------------------------------
+pages = [st.Page(render_assistant_page, title="Assistant", icon="💬", default=True)]
+if st.session_state.admin_authenticated:
+    pages.append(st.Page(render_admin_page, title="Admin", icon="🛠️"))
+
+st.navigation(pages).run()

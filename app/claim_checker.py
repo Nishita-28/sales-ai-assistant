@@ -1,99 +1,59 @@
 #python -m app.claim_checker
 """Implements the "Claim checker" component (spec 4.1) and the claim-
 checking rules in Implementation Details 12.3: scans a question and its
-draft answer for restricted-claim terms (see data/restricted_claims.md),
-decides which risk category applies, and blocks customer-facing wording
-when a matched term isn't backed by the actual retrieved source text.
+draft answer for restricted-claim terms, decides which risk category
+applies, and blocks customer-facing wording when a matched term isn't
+backed by the actual retrieved source text.
 
 Deliberately keyword-based, not an LLM/ML classifier -- spec 12.3: "Keep
 this simple initially using keyword rules; ML classification can be a
 later improvement." Same reasoning as intent.py's classifier.
 
 Risk categories match streamlit_app.py's RISK_COLORS keys exactly: None,
-Certification, Accuracy, Safety, Pricing, Legal, Delivery. Kept in sync by
-hand with data/restricted_claims.md -- update both together if the policy
-changes.
+Certification, Accuracy, Safety, Pricing, Legal, Delivery.
+
+The actual keyword/category/always-unsupported policy lives in
+data/restricted_claims.yaml (see app/restricted_policy.py), not here --
+it's edited through the Admin page, and _load_policy() below picks up
+changes automatically (checked by file mtime, so a save takes effect on
+the very next check without restarting the app, but repeated checks
+against an unchanged file don't reparse it every time).
 """
 from __future__ import annotations
 
 import re
 import sys
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional
+
+from app.restricted_policy import PolicyError, build_lookup, load_entries
 
 NONE_CATEGORY = "None"
 
-# Checked in this order -- first category with a match wins, most specific/
-# highest-stakes first (mirrors intent.py's priority-order rationale). A
-# question mentioning both a named certification and a price shouldn't get
-# labelled "Pricing" just because pricing happens to be checked last.
-RESTRICTED_TERM_CATEGORIES: dict[str, list[str]] = {
-    "Certification": [
-        # Named standards/marks the docs explicitly do NOT hold (spec 8.2,
-        # data/restricted_claims.md) -- these must never be confirmed. See
-        # ALWAYS_UNSUPPORTED_TERMS below: presence in source text alone
-        # isn't trusted for these, since the approved deck's own "IECEx &
-        # ATEX in Process" line genuinely contains the words "atex" and
-        # "iecex" while denying, not confirming, the claim.
-        "atex", "iecex", "sil", "sil-2", "sil2",
-        "life-safety", "life safety", "explosion proof", "explosion-proof",
-        # "ce marked" listed separately -- the trailing-plural regex in
-        # _contains_term doesn't cover "-ed", so "mark" alone wouldn't
-        # catch the natural phrasing "Is this CE marked?".
-        "ce mark", "ce marking", "ce marked",
-        # Genuinely held certifications too -- a question about these is
-        # still worth flagging, since the approval is scoped to a specific
-        # product/configuration (e.g. PESO only covers the FIXaHY, Gas
-        # Group IIC Zone 1) and must not be generalized to the whole line.
-        # Unlike the ones above, these CAN legitimately be source-supported
-        # for the right product, so they stay normally evidence-checked.
-        "peso", "arai", "iec",
-        "flameproof", "zone 1", "zone 2", "gas group", "ex ia",
-        "intrinsically safe",
-        "certified", "certification", "approved", "approval",
-        "hazardous area", "hazardous zone",
-    ],
-    "Accuracy": [
-        "ppm accuracy", "accuracy", "universal gas detection",
-        "universal detection", "detects any gas", "100% accurate",
-        "always accurate",
-        # The MEMS platform's roadmap gas list (data/restricted_claims.md)
-        # -- singular so the trailing-plural regex in _contains_term also
-        # catches "hydrocarbons"/"refrigerants". Also in
-        # ALWAYS_UNSUPPORTED_TERMS: the roadmap slide genuinely names these
-        # gases, but that's the technology's target capability, not any
-        # current product's spec.
-        "helium", "methane", "sf6", "hydrocarbon", "refrigerant",
-    ],
-    "Safety": [
-        "safe to use", "completely safe", "guaranteed safe",
-        "fail-safe", "failsafe", "no risk of",
-    ],
-    "Pricing": [
-        "price", "pricing", "quotation", "quote", "cost", "discount",
-        "warranty",
-    ],
-    "Delivery": [
-        "delivery", "lead time", "guaranteed delivery",
-        "ship date", "shipping date",
-    ],
-    "Legal": [
-        "legal", "regulatory", "liability", "indemnif",
-        "compliance guarantee",
-    ],
-}
+POLICY_PATH = Path("data/restricted_claims.yaml")
 
-# data/restricted_claims.md phrases these as "NOT currently held" / "never
-# confirm" / "not mentioned anywhere" -- flat denials, not claims scoped to
-# a specific product. Source-text presence can't be trusted for these (see
-# comments above), so they're always treated as unsupported regardless of
-# what check_restricted_claims finds in source_text. Everything else in
-# RESTRICTED_TERM_CATEGORIES stays normally evidence-checked.
-ALWAYS_UNSUPPORTED_TERMS: set[str] = {
-    "atex", "iecex", "sil", "sil-2", "sil2",
-    "life-safety", "life safety", "explosion proof", "explosion-proof",
-    "ce mark", "ce marking",
-    "helium", "methane", "sf6", "hydrocarbon", "refrigerant",
-}
+# (mtime the cache was built from, categories dict, always_unsupported set)
+_policy_cache: Optional[tuple[float, dict[str, list[str]], set[str]]] = None
+
+
+def _load_policy() -> tuple[dict[str, list[str]], set[str]]:
+    """Categories are checked in the order they first appear in the policy
+    file (first matching category wins) -- mirrors the old hardcoded
+    dict's insertion-order behaviour, just sourced from disk now."""
+    global _policy_cache
+
+    try:
+        mtime = POLICY_PATH.stat().st_mtime
+    except OSError as e:
+        raise PolicyError(f"Restricted-claims policy file not found at {POLICY_PATH}: {e}") from e
+
+    if _policy_cache is not None and _policy_cache[0] == mtime:
+        return _policy_cache[1], _policy_cache[2]
+
+    categories, always_unsupported = build_lookup(load_entries(POLICY_PATH))
+    _policy_cache = (mtime, categories, always_unsupported)
+    return categories, always_unsupported
 
 
 def _normalize(text: str) -> str:
@@ -118,10 +78,11 @@ ANSWER_TEXT_EXCLUDED_TERMS = {"approved", "approval"}
 
 def _classify_category(text: str, exclude: set[str] = frozenset()) -> tuple[str, list[str]]:
     """Returns (category, matched_terms) for the first category (in
-    RESTRICTED_TERM_CATEGORIES order) with any term present in `text`
+    policy-file order, see _load_policy) with any term present in `text`
     (skipping any term in `exclude`), or (NONE_CATEGORY, []) if nothing
     restricted was found."""
-    for category, terms in RESTRICTED_TERM_CATEGORIES.items():
+    categories, _ = _load_policy()
+    for category, terms in categories.items():
         matched = [t for t in terms if t not in exclude and _contains_term(text, t)]
         if matched:
             return category, matched
@@ -130,8 +91,8 @@ def _classify_category(text: str, exclude: set[str] = frozenset()) -> tuple[str,
 
 @dataclass
 class ClaimCheckResult:
-    """category is one of RESTRICTED_TERM_CATEGORIES' keys, or "None" if
-    nothing restricted was found in the question or draft answer.
+    """category is one of the categories named in data/restricted_claims.yaml,
+    or "None" if nothing restricted was found in the question or draft answer.
 
     is_blocked is True when a restricted term was matched AND that term
     does not itself appear anywhere in the retrieved source text (spec
@@ -164,14 +125,17 @@ def check_restricted_claims(question: str, answer_text: str, source_text: str) -
     source_text is the retrieved evidence actually cited as sources for
     this answer (e.g. the concatenated text of retriever.retrieve()'s
     matches) -- a term is "supported" only if it appears there too, unless
-    it's in ALWAYS_UNSUPPORTED_TERMS (flat denials like ATEX/CE/the MEMS
-    gas list, where source-text presence doesn't mean confirmation -- see
-    that set's docstring). Pass an empty string when there were no sources
-    at all; every matched term is then correctly unsupported.
+    its policy entry has always_unsupported: true (flat denials like
+    ATEX/CE/the MEMS gas list, where source-text presence doesn't mean
+    confirmation -- see data/restricted_claims.yaml). Pass an empty string
+    when there were no sources at all; every matched term is then
+    correctly unsupported.
     """
     question_norm = _normalize(question)
     answer_norm = _normalize(answer_text)
     source_norm = _normalize(source_text)
+
+    _, always_unsupported = _load_policy()
 
     q_category, q_matches = _classify_category(question_norm)
     a_category, a_matches = _classify_category(answer_norm, exclude=ANSWER_TEXT_EXCLUDED_TERMS)
@@ -180,7 +144,7 @@ def check_restricted_claims(question: str, answer_text: str, source_text: str) -
     matched_terms = sorted(set(q_matches) | set(a_matches))
     unsupported_terms = [
         t for t in matched_terms
-        if t in ALWAYS_UNSUPPORTED_TERMS or not _contains_term(source_norm, t)
+        if t in always_unsupported or not _contains_term(source_norm, t)
     ]
 
     is_blocked = category != NONE_CATEGORY and bool(unsupported_terms)
@@ -207,7 +171,7 @@ if __name__ == "__main__":
             "standards and is PESO approved for Zone 1 Gas Group IIC, but there is "
             "no explicit mention of ATEX certification.",
             # Real retrieved evidence never mentions ATEX (it's "in process",
-            # per data/restricted_claims.md) -- "atex" stays unsupported.
+            # per data/restricted_claims.yaml) -- "atex" stays unsupported.
             "FIXaHY is PESO approved for Gas Group IIC Zone 1. Tested at a "
             "3rd party BASEEFA accredited lab per IS/IEC 60079-11 and 60079-0.",
             "Certification", True,
@@ -249,7 +213,7 @@ if __name__ == "__main__":
             "None", False,
         ),
         (
-            # Per data/restricted_claims.md: this is the MEMS platform's
+            # Per data/restricted_claims.yaml: this is the MEMS platform's
             # roadmap target, not any current product's spec -- must be
             # blocked even though the roadmap slide's own text (used here
             # as source_text) genuinely contains all these gas names.
