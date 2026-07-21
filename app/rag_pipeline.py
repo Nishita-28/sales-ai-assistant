@@ -1,16 +1,7 @@
 #python -m app.rag_pipeline "Can we detect hydrogen?"
-"""Implements the top-level orchestration in spec Appendix A's pseudocode
-and the Agentic Workflow steps in spec section 5: question -> intent
-classification -> retrieval -> answer generation -> claim checking ->
-structured result.
-
-Every step already exists in its own component (spec 4.1): intent.py's
-classify_intent, retriever.py's retrieve, and response_generator.py's
-generate_answer (which already runs claim_checker.py's
-check_restricted_claims internally and gates customer_wording on it --
-see response_generator.py's generate_answer docstring). This module only
-wires those three together and shapes the result to match Appendix A's
-return dict; it doesn't reimplement any of their logic.
+"""Top-level orchestration: question -> intent classification -> retrieval
+-> answer generation -> claim checking -> structured result. Just wires
+the other components together; no logic of its own.
 """
 from __future__ import annotations
 
@@ -24,14 +15,8 @@ from app.retriever import retrieve
 
 
 def answer_question(question: str, want_customer_wording: bool = False) -> dict[str, Any]:
-    """Runs one question through the full pipeline and returns a dict
-    shaped like spec Appendix A's pseudocode: answer, sources, confidence,
-    risk_flag, customer_wording (plus intent, for callers that want it).
-
-    Raises retriever.RetrieverError or response_generator.ResponseGeneratorError
-    if retrieval or generation fails -- not caught here, same as every
-    other component in this pipeline leaves error handling to its caller.
-    """
+    """Runs one question through the full pipeline and returns a structured
+    result dict. Raises RetrieverError or ResponseGeneratorError on failure."""
     intent: Intent = classify_intent(question)
     retrieval = retrieve(question)
     result = generate_answer(question, retrieval, intent, want_customer_wording)

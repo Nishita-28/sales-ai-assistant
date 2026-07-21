@@ -75,13 +75,9 @@ def _normalize(text: str) -> str:
 
 
 def _contains_keyword(text: str, keyword: str) -> bool:
-    """Word-boundary match, tolerant of a trailing "s"/"es" on the keyword
-    (e.g. "certification" also matches "certifications", "detector" also
-    matches "detectors") so plural phrasing doesn't need every keyword
-    hand-listed twice, and so a keyword doesn't need a separate redundant
-    entry just for its plural form. Doesn't handle irregular plurals (e.g.
-    "accuracy" -> "accuracies") or verb tense (e.g. "deploy" -> "deployed")
-    -- none of the current keywords need that."""
+    """Word-boundary match, tolerant of a trailing "s"/"es" so keywords
+    don't need a separate plural entry. Doesn't handle irregular plurals or
+    verb tense -- none of the current keywords need that."""
     pattern = r"\b" + re.escape(keyword) + r"(?:es|s)?\b"
     return re.search(pattern, text) is not None
 
@@ -140,7 +136,7 @@ if __name__ == "__main__":
         ("Is the enclosure IP68 rated?", "product"),
         ("Is this rated for hazardous zones?", "compliance"),
         
-        # manufacturing"/"space industry" keywords no longer misfire here.
+        # Confirms "manufacturing"/"space industry" keywords don't misfire here.
         ("Is the sensor probe small enough to fit in a tight space?", "product"),
         ("Do you have any space industry or aerospace customers?", "application"),
         ("Is this suitable for steel manufacturing or process industries?", "application"),

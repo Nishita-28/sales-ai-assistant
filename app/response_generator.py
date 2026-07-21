@@ -41,10 +41,10 @@ def _env_flag(name: str, default: bool) -> bool:
     return raw.strip().lower() not in ("false", "0", "no", "")
 
 
-# Per spec 12.2: "Do not answer if no relevant source is found."
+# If true, skip the LLM call entirely when no relevant source was found.
 REQUIRE_SOURCES = _env_flag("REQUIRE_SOURCES", True)
 
-# Per spec 6.7.6: default false; gates customer_wording regardless of request.
+# Off by default -- gates customer_wording regardless of what's requested.
 ALLOW_CUSTOMER_FACING_OUTPUT = _env_flag("ALLOW_CUSTOMER_FACING_OUTPUT", False)
 
 NO_SOURCE_MESSAGE = (
@@ -60,12 +60,13 @@ class ResponseGeneratorError(RuntimeError):
 
 @dataclass
 class GeneratedAnswer:
-    """Shaped to match what streamlit_app.py's UI already expects."""
+    """The answer returned to the UI, plus its sources, confidence, risk
+    category, and optional customer-facing draft."""
 
     answer: str
     sources: list[tuple[str, str]]
-    confidence: str  # "High" | "Low" -- see _display_confidence (retriever.py has no "Medium" tier)
-    risk: str  # from claim_checker.py -- one of RESTRICTED_TERM_CATEGORIES' keys, or "None"
+    confidence: str  # "High" or "Low"
+    risk: str  # risk category, or "None"
     customer_wording: Optional[str]
 
     def to_dict(self) -> dict[str, Any]:
@@ -79,10 +80,8 @@ class GeneratedAnswer:
 
 
 def _unsupported_answer(question: str) -> GeneratedAnswer:
-    # No draft answer or sources exist yet, but the question itself may
-    # still name a restricted topic (e.g. a pricing question with no
-    # matching source) -- scanning it means the risk badge is still
-    # meaningful. source_text="" means any matched term is unsupported.
+    # Still scan the question itself for restricted terms so the risk badge
+    # stays meaningful even with no draft answer or sources.
     claim_result = check_restricted_claims(question, "", source_text="")
     return GeneratedAnswer(
         answer=NO_SOURCE_MESSAGE,
@@ -94,7 +93,7 @@ def _unsupported_answer(question: str) -> GeneratedAnswer:
 
 
 # ---------------------------------------------------------------------------
-# Prompt loading (spec 9: "stored as editable files, not hardcoded")
+# Prompt loading
 # ---------------------------------------------------------------------------
 _system_prompt_cache: Optional[str] = None
 
@@ -113,7 +112,7 @@ def _load_system_prompt() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Building the LLM request from retriever.py's output
+# Building the LLM request
 # ---------------------------------------------------------------------------
 def _format_source(metadata: dict[str, Any]) -> tuple[str, str]:
     """Turns one match's Chroma metadata into a (document_name,
@@ -216,8 +215,8 @@ def _get_azure_openai_chat_client():
 
 
 def _call_offline_mock(user_message: str) -> str:
-    """No network call -- a fixed, well-formed reply so the rest of the
-    pipeline is exercisable without a real API key."""
+    """A fixed, well-formed reply so the pipeline is testable without a
+    real API key."""
     return (
         "Short answer:\n"
         "[offline_mock] Placeholder answer -- no real LLM was called. "
@@ -257,7 +256,7 @@ def _call_llm(system_prompt: str, user_message: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Parsing the LLM's reply (see app/prompts/answer_format.md)
+# Parsing the LLM's reply
 # ---------------------------------------------------------------------------
 _SECTION_RE = re.compile(
     r"^(Short answer|Sources|Confidence|Risk flag|Customer-facing wording):\s*$",
@@ -266,8 +265,8 @@ _SECTION_RE = re.compile(
 
 
 def _parse_llm_response(raw_text: str) -> dict[str, str]:
-    """Splits the reply into answer_format.md's sections, keyed by
-    lowercase header. A skipped section is simply absent from the result."""
+    """Splits the reply into its labeled sections, keyed by lowercase
+    header. A skipped section is simply absent from the result."""
     sections: dict[str, str] = {}
     matches = list(_SECTION_RE.finditer(raw_text))
     for i, match in enumerate(matches):
@@ -287,9 +286,8 @@ def _extract_customer_wording(sections: dict[str, str]) -> Optional[str]:
     return text
 
 
-# Confidence is tied to retrieval quality (spec 12.2), not the LLM's own
-# self-assessment. retrieve()'s confidence field is retriever.py's alone --
-# this just relabels it for display, with no thresholds of its own.
+# Confidence is tied to retrieval quality, not the LLM's own self-assessment
+# -- this just relabels it for display, with no thresholds of its own.
 _CONFIDENCE_LABELS = {"high": "High", "low": "Low"}
 
 
@@ -307,16 +305,8 @@ def generate_answer(
     want_customer_wording: bool = False,
 ) -> GeneratedAnswer:
     """Generates the internal answer (and, if requested and enabled, a
-    customer-facing draft) for one question, given retriever.retrieve()'s
-    output.
-
-    No LLM call is made -- NO_SOURCE_MESSAGE is returned instead -- when
-    REQUIRE_SOURCES is true and retrieval found nothing usable.
-    customer_wording is None unless both want_customer_wording and
-    ALLOW_CUSTOMER_FACING_OUTPUT are true.
-
-    Raises ResponseGeneratorError if prompt loading or the LLM call fails.
-    """
+    customer-facing draft) for one question. Returns NO_SOURCE_MESSAGE
+    instead of calling the LLM if retrieval found nothing usable."""
     matches = retrieval.get("matches") or []
     retrieval_confidence = retrieval.get("confidence", "none")
 
@@ -338,12 +328,9 @@ def generate_answer(
     answer_text = sections.get("short_answer") or raw_reply.strip() or NO_SOURCE_MESSAGE
     confidence = _display_confidence(retrieval_confidence)
 
-    # Spec 12.3: scan question + draft answer for restricted-claim terms,
-    # and block customer_wording below unless the retrieved source text
-    # itself backs every matched term -- not based on similarity score, so
-    # a real but low-similarity match isn't wrongly blocked, and a
-    # confidently-retrieved chunk can't launder an answer that goes beyond
-    # what it actually says.
+    # Block customer_wording unless the source text itself backs every
+    # restricted term matched -- a confident retrieval can't launder an
+    # answer that goes beyond what the source actually says.
     source_text = " ".join(m.get("text", "") for m in matches)
     claim_result = check_restricted_claims(question, answer_text, source_text)
 

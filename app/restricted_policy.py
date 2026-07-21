@@ -1,15 +1,6 @@
-"""Reads/writes data/restricted_claims.yaml -- the single source of truth
-for restricted-claim enforcement -- and turns it into the lookup
-structures app/claim_checker.py actually matches against.
-
-Replaces what used to be hardcoded RESTRICTED_TERM_CATEGORIES /
-ALWAYS_UNSUPPORTED_TERMS constants in claim_checker.py. One entry here is
-one policy topic: a category, the keyword(s)/phrase(s) that trigger it, whether
-matches are always treated as unsupported regardless of retrieved
-evidence (see PolicyEntry.always_unsupported), and a human-readable note
-for the Admin UI. Multiple entries can share a category -- claim_checker.py
-checks categories in the order they first appear across all entries, same
-as the old dict-of-lists did.
+"""Reads and writes the restricted-claims policy file. One entry is one
+policy topic: a category, its trigger keywords, whether matches are always
+unsupported, and a note shown in the Admin UI.
 """
 from __future__ import annotations
 
@@ -18,9 +9,8 @@ from pathlib import Path
 
 import yaml
 
-# The six risk categories streamlit_app.py's RISK_COLORS renders -- kept
-# here (not just implied by whatever's in the file) so the Admin UI's
-# category picker can't drift from what the rest of the app recognizes.
+# The risk categories the UI can render -- keeps the Admin category picker
+# from drifting out of sync.
 KNOWN_CATEGORIES = ["Certification", "Accuracy", "Safety", "Pricing", "Delivery", "Legal"]
 
 
@@ -40,10 +30,7 @@ class PolicyEntry:
 
 
 def load_entries(path: Path) -> list[PolicyEntry]:
-    """Returns [] if the file doesn't exist yet (a fresh install before an
-    admin has added any policy) rather than raising -- callers that need
-    to distinguish "no policy" from "policy load failed" can check
-    path.exists() themselves first."""
+    """Returns [] if the file doesn't exist yet, rather than raising."""
     if not path.exists():
         return []
 
@@ -82,11 +69,8 @@ def save_entries(path: Path, entries: list[PolicyEntry]) -> None:
 
 
 def build_lookup(entries: list[PolicyEntry]) -> tuple[dict[str, list[str]], set[str]]:
-    """Aggregates entries into the two structures claim_checker.py's
-    matching logic needs: category -> all its keywords (in first-seen
-    category order, mirroring the old dict-of-lists' checked-in-order
-    behaviour), and the flat set of keywords that are always unsupported
-    regardless of retrieved evidence."""
+    """Groups entries by category -> all its keywords, plus the flat set
+    of always-unsupported keywords."""
     categories: dict[str, list[str]] = {}
     always_unsupported: set[str] = set()
 

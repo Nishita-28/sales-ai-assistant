@@ -38,10 +38,8 @@ def _row_nonempty(row: list[str]) -> list[str]:
 
 
 def _row_raw_text_counts(row: list[str]) -> Counter[str]:
-    """Counts a row's non-empty cell text, treating a fully-merged row
-    (every cell holding the same text) as ONE logical value rather than
-    one per duplicated cell -- otherwise a genuine merged subsection-header
-    row falsely reports as "dropped" during coverage checks."""
+    """Counts a row's non-empty cells, treating a fully-merged row as one
+    value so it isn't flagged as a dropped duplicate."""
     nonempty = _row_nonempty(row)
     if not nonempty:
         return Counter()
@@ -60,19 +58,16 @@ def _looks_like_header_cell(text: str) -> bool:
 
 
 def _row_extends_header(prev_row: list[str], row: list[str]) -> bool:
-    """True if `row` plausibly continues a multi-level header: it has a
-    blank cell (filler under a spanning header cell) or repeats a value
-    from the row above (a grouping label spanning sub-columns). Being
-    short and non-numeric alone isn't enough -- genuine data rows can look
-    like that too."""
+    """True if `row` likely continues a multi-level header -- it has a
+    blank cell or repeats a value from the row above."""
     has_blank_cell = any(not c for c in row)
     repeats_row_above = bool(set(_row_nonempty(row)) & set(_row_nonempty(prev_row)))
     return has_blank_cell or repeats_row_above
 
 
 def _detect_header_row_count(grid: list[list[str]], max_header_rows: int = 3) -> int:
-    """Count consecutive rows from the top forming a (possibly
-    multi-level) header block. Row 0 always counts."""
+    """Counts consecutive rows forming a multi-level header block; row 0
+    always counts."""
     if not grid:
         return 1
     count = 1
@@ -114,10 +109,8 @@ def _build_composite_columns(grid: list[list[str]], header_row_count: int) -> li
 
 
 def _is_section_header_row(row_idx: int, grid: list[list[str]], is_bold_fn: IsBoldFn) -> bool:
-    """True only for a genuine section-separator row: a single non-empty
-    cell, or a merged row where every cell repeats the same text -- AND
-    that cell is bold. A normal two-column data row never qualifies here,
-    even with a bold label."""
+    """True only for a genuine section-separator row: a single or merged
+    bold cell."""
     row = grid[row_idx]
     nonempty = _row_nonempty(row)
     if not nonempty:
@@ -134,10 +127,7 @@ def _is_option_row(row: list[str]) -> bool:
 
 
 def _row_is_full_header_row(row: list[str], row_idx: int, is_bold_fn: IsBoldFn) -> bool:
-    """True only if every non-empty cell in the row is bold -- a real data
-    row (e.g. "Operating Temperature | -20C") almost always has only its
-    label bold, not its value, so this doesn't misfire on it the way a
-    blanket "row 0 is always the header" assumption would."""
+    """True only if every non-empty cell in the row is bold."""
     nonempty_cols = [c for c, text in enumerate(row) if text]
     if len(nonempty_cols) < 2:
         return False
@@ -155,15 +145,8 @@ def _build_keyvalue_table(
             continue
 
         if row_idx == 0 and _row_is_full_header_row(row, row_idx, is_bold_fn):
-            # Only skip row 0 when it's actually formatted like a header
-            # (both cells bold); a table with no header row is left alone.
             continue
 
-        # A subsection separator is a single-cell/merged bold row -- not
-        # just "column 0 is bold," which an ordinary bold-labeled data row
-        # can also be. Using is_bold_fn(row_idx, 0) alone here was what
-        # previously caused real data rows to be misread as headers and
-        # silently dropped.
         if _is_section_header_row(row_idx, grid, is_bold_fn):
             current_subsection = _row_nonempty(row)[0]
             continue
@@ -296,11 +279,8 @@ def _detect_table_style(grid: list[list[str]], is_bold_fn: IsBoldFn) -> str:
 
 
 def _collect_table_output_texts(block: dict[str, Any]) -> Counter[str]:
-    """Counts every DATA text value that made it into a table block's
-    structured output -- deliberately not header-row cells (see
-    check_table_coverage for why those aren't verified here). Uses
-    counts, not a set of unique strings -- a set would treat a value
-    appearing twice as "covered" even if only one occurrence survived."""
+    """Counts every data value in the structured output, using counts
+    rather than a set so a repeated value isn't covered by one survivor."""
     counts: Counter[str] = Counter()
     style = block.get("style", "header")
 
@@ -312,11 +292,7 @@ def _collect_table_output_texts(block: dict[str, Any]) -> Counter[str]:
                 counts[row["value"]] += 1
             if row.get("subsection"):
                 counts[row["subsection"]] += 1
-        # Row 0 is either genuine data (already counted above --
-        # _build_keyvalue_table only skips it when it's a real bold
-        # header row) or a skipped header row -- either way it's
-        # accounted for. Credit it unconditionally rather than trying to
-        # tell which case applies from the structured output alone.
+        # Row 0 is either real data or a skipped header row, so credit it either way.
         raw_grid = block.get("raw_grid", [])
         if raw_grid:
             counts.update(_row_raw_text_counts(raw_grid[0]))
@@ -353,29 +329,8 @@ def _collect_table_output_texts(block: dict[str, Any]) -> Counter[str]:
 
 
 def check_table_coverage(block: dict[str, Any]) -> list[str]:
-    """Compares a table block's raw_grid DATA rows against its structured
-    output and returns any cell text that was silently dropped during
-    classification. Empty list means nothing was lost.
-
-    Header rows are deliberately excluded from this comparison, for every
-    style: _build_composite_columns, _build_simple_table, and
-    _build_keyvalue_table all fold every header-row cell into some
-    structured field by construction (a composite column name, a
-    "(2)"-suffixed duplicate name, or an unconditionally-credited row 0)
-    -- there is no code path where a header cell's raw text is silently
-    discarded, so it doesn't need independent verification. An earlier
-    version of this function tried to verify header cells anyway, by
-    reverse-parsing the joined output text back into its original pieces
-    (splitting a composite column name on " - ", stripping a trailing
-    "(2)"). That's unreliable: a composite name like "International
-    Business through Distributor - 21Senses Inc. - Sr No" can't be split
-    back into its real parts by looking for " - ", because the original
-    header text itself already contained " - " as ordinary punctuation,
-    indistinguishable after the fact from the join separator. Comparing
-    only the data rows -- the rows a real classification bug could
-    actually drop -- avoids that whole false-positive class structurally,
-    rather than trying to out-guess it with more string matching.
-    """
+    """Compares a table's raw data rows against its structured output and
+    returns any values that were silently dropped."""
     raw_grid = block.get("raw_grid", [])
     style = block.get("style", "header")
 
@@ -442,7 +397,7 @@ def _cell_is_bold_docx(cell) -> bool:
 
 
 def resolve_table_grid(table) -> list[list[str]]:
-    """docx: merges are already text-duplicated by python-docx's row.cells."""
+    """Merged cells are already text-duplicated by python-docx's row.cells."""
     grid = [[_clean_text(cell.text) for cell in row.cells] for row in table.rows]
     max_len = max((len(row) for row in grid), default=0)
     for row in grid:
@@ -450,13 +405,9 @@ def resolve_table_grid(table) -> list[list[str]]:
     return grid
 
 
-# Word wraps every text box in <mc:AlternateContent>, with TWO
-# functionally-identical renderings of the SAME text as siblings: a modern
-# DrawingML <mc:Choice> and a legacy VML <mc:Fallback>, kept for
-# compatibility with readers that don't support one or the other. Only one
-# is real content -- extracting both would duplicate every text box
-# verbatim. "mc" isn't in python-docx's own qn() namespace map, hence the
-# literal URIs rather than qn("mc:...").
+# Word wraps each text box in two identical copies of the same content
+# (a modern version and a legacy fallback) -- read only one or text boxes
+# get duplicated.
 _MC_NS = "http://schemas.openxmlformats.org/markup-compatibility/2006"
 _MC_ALTERNATE_CONTENT = f"{{{_MC_NS}}}AlternateContent"
 _MC_CHOICE = f"{{{_MC_NS}}}Choice"
@@ -464,10 +415,7 @@ _MC_FALLBACK = f"{{{_MC_NS}}}Fallback"
 
 
 def _iter_textbox_paragraph_elements(paragraph_element):
-    """Yields <w:p> elements from inside any text box(es) anchored to this
-    paragraph (preferring each AlternateContent's Choice branch over its
-    Fallback -- see module comment above). A paragraph with no text boxes
-    yields nothing."""
+    """Yields paragraph elements from text boxes anchored to this paragraph."""
     from docx.oxml.ns import qn
 
     for alt in paragraph_element.iter(_MC_ALTERNATE_CONTENT):
@@ -530,21 +478,12 @@ def extract_docx_blocks(file_path: str | Path) -> list[dict[str, Any]]:
                 })
                 block_index += 1
 
-            # A text box's anchor paragraph is often otherwise empty (the
-            # visible text lives entirely inside the box), so this must
-            # run regardless of whether the paragraph itself had text --
-            # see _iter_textbox_paragraph_elements.
             for tb_element in _iter_textbox_paragraph_elements(element):
                 tb_paragraph = Paragraph(tb_element, document)
                 tb_text = _clean_text(tb_paragraph.text)
                 if not tb_text:
                     continue
-                # Doesn't update current_section even if this classifies
-                # as a heading: a text box is a floating/anchored caption,
-                # not part of the normal reading flow, so letting it
-                # override the section context for whatever normal-flow
-                # content follows would be more likely to mislabel later
-                # blocks than to correctly describe them.
+                # Text boxes are floating captions, so they don't set current_section.
                 blocks.append({
                     "type": _paragraph_type_docx(tb_paragraph),
                     "text": tb_text,
@@ -573,10 +512,7 @@ def extract_docx_blocks(file_path: str | Path) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 def _resolve_pptx_table_grid(table) -> list[list[str]]:
-    """python-pptx does NOT auto-duplicate merged-cell text like python-docx
-    does -- it exposes is_merge_origin/is_spanned/span_height/span_width
-    instead. Re-expand manually so spanned positions carry the origin
-    cell's text, matching docx's grid shape."""
+    """Re-expands merged cells so the grid matches the table's visible shape."""
     n_rows, n_cols = len(table.rows), len(table.columns)
     grid = [["" for _ in range(n_cols)] for _ in range(n_rows)]
 
@@ -620,9 +556,7 @@ def extract_pptx_blocks(file_path: str | Path) -> list[dict[str, Any]]:
             nonlocal table_index, current_section, block_index
             for shape in shapes:
                 if shape.shape_type == MSO_SHAPE_TYPE.GROUP:
-                    # Recurse -- a GROUP has neither has_table nor
-                    # has_text_frame itself, so without this its children
-                    # were silently skipped entirely, not just misclassified.
+                    # Groups have no table/text of their own; recurse into their children.
                     process_shapes(shape.shapes)
                     continue
 
@@ -676,9 +610,8 @@ def extract_pptx_blocks(file_path: str | Path) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# PDF (pypdf) -- text only; no reliable font/bold or table extraction, so
-# headings use the same short-line heuristic as the docx fallback, and
-# tables are NOT detected.
+# PDF -- text only, no font/bold info, so headings use a plaintext
+# heuristic and tables aren't detected.
 # ---------------------------------------------------------------------------
 
 def _paragraph_type_plaintext(text: str) -> str:
@@ -725,8 +658,8 @@ def extract_pdf_blocks(file_path: str | Path) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 def extract_csv_blocks(file_path: str | Path) -> list[dict[str, Any]]:
-    """A CSV is one table, always classified as 'header' style since
-    there is no formatting metadata to detect bold section rows."""
+    """A CSV is one table, always 'header' style -- no formatting info to
+    detect section rows."""
     path = Path(file_path)
     filename = path.name
 
@@ -747,19 +680,12 @@ def extract_csv_blocks(file_path: str | Path) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# XLSX -- one table block per worksheet, using the same header/section
-# detection as docx/pptx tables (unlike CSV, real bold formatting is
-# available here, so multi-level headers and bold section rows can
-# actually be detected instead of falling back to "header" style always).
+# XLSX -- one table block per worksheet, with real bold formatting available.
 # ---------------------------------------------------------------------------
 
 def _read_xlsx_sheet_grid(worksheet) -> tuple[list[list[str]], list[list[Any]]]:
-    """Returns (text_grid, cell_rows): cell_rows holds the real openpyxl
-    Cell objects at the same [row][col] positions as text_grid, so bold
-    formatting can still be looked up after blank rows are dropped.
-    Fully-blank rows are dropped entirely -- large spreadsheet exports
-    routinely have hundreds of formatted-but-empty rows past the real
-    data, the same issue the CSV extractor already filters out."""
+    """Returns (text_grid, cell_rows), dropping blank rows while keeping
+    bold formatting lookups intact."""
     text_rows: list[list[str]] = []
     cell_rows: list[list[Any]] = []
 
@@ -784,8 +710,8 @@ def _cell_is_bold_xlsx(cell_rows: list[list[Any]], row_idx: int, col_idx: int) -
 
 
 def extract_xlsx_blocks(file_path: str | Path) -> list[dict[str, Any]]:
-    """One table block per worksheet. data_only=True reads each formula
-    cell's last-computed value rather than the formula text itself."""
+    """One table block per worksheet, reading computed values rather than
+    formula text."""
     from openpyxl import load_workbook
 
     path = Path(file_path)
@@ -911,22 +837,16 @@ def extract_txt_blocks(file_path: str | Path) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# Document-level coverage check
+# Document-level coverage check -- catches content the block loop never
+# visited at all, not just values dropped inside a found table.
 # ---------------------------------------------------------------------------
-# check_table_coverage only looks inside tables that were already found --
-# it can't see content the block-building loop never visited at all (e.g.
-# text nested inside a PPTX GROUP shape). This independently re-walks the
-# raw source for a ground-truth word count and compares it to what made it
-# into the extracted blocks.
 
 DOCUMENT_COVERAGE_WARNING_THRESHOLD = 0.90  # warn if under 90% of raw words made it out
 
 
 def _raw_word_count(file_path: str | Path) -> Optional[int]:
-    """Independently counts words in the raw source rather than reusing
-    extract_blocks()'s own traversal -- reusing it would just re-confirm
-    whatever that traversal already decided to visit. Returns None if
-    there's no independent counter for this format yet."""
+    """Independently counts words in the raw source file. Returns None if
+    there's no counter for this format yet."""
     path = Path(file_path)
     suffix = path.suffix.lower()
 
@@ -936,14 +856,8 @@ def _raw_word_count(file_path: str | Path) -> Optional[int]:
         from docx.text.paragraph import Paragraph
 
         doc = Document(path)
-        # Concatenate each paragraph's/cell's runs before splitting into
-        # words -- matching how extract_docx_blocks() counts -- rather
-        # than splitting each individual <w:t> run separately and summing.
-        # Word frequently splits a single word across adjacent runs (e.g.
-        # a formatting change mid-word: "C" + "ompact"), which the
-        # per-run approach previously double-counted as two words,
-        # inflating this baseline and producing false "content loss"
-        # warnings for documents nothing was actually lost from.
+        # Joins each paragraph's runs before counting words, since Word
+        # sometimes splits a single word across two runs.
         count = sum(len(p.text.split()) for p in doc.paragraphs)
         count += sum(len(cell.text.split()) for t in doc.tables for row in t.rows for cell in row.cells)
         for p_element in doc.element.body.iterchildren():
@@ -984,12 +898,7 @@ def _raw_word_count(file_path: str | Path) -> Optional[int]:
         return sum(len((page.extract_text() or "").split()) for page in reader.pages)
 
     if suffix == ".csv":
-        # Parses through csv.reader rather than splitting the raw file
-        # text on whitespace -- a naive whitespace split doesn't
-        # understand comma-delimiting, so a run of empty cells with no
-        # space between their separating commas (e.g. a blank row:
-        # ",,,,,,,,,,,,,,,,,,,") reads as a single non-empty "word" that
-        # doesn't exist in any real cell, inflating this baseline.
+        # csv.reader avoids misreading empty comma-separated cells as words.
         with open(path, "r", encoding="utf-8-sig", newline="") as f:
             reader = csv.reader(f)
             return sum(len(cell.split()) for row in reader for cell in row)
@@ -997,9 +906,7 @@ def _raw_word_count(file_path: str | Path) -> Optional[int]:
     if suffix == ".xlsx":
         from openpyxl import load_workbook
 
-        # read_only=True: this only needs cell values, not font/style info
-        # (that's only needed by extract_xlsx_blocks' bold detection), so
-        # the lighter-weight read-only mode is fine and faster here.
+        # read_only is fine here since only cell values are needed, not formatting.
         workbook = load_workbook(path, data_only=True, read_only=True)
         count = 0
         for sheet_name in workbook.sheetnames:
@@ -1016,10 +923,7 @@ def _raw_word_count(file_path: str | Path) -> Optional[int]:
 
 
 def _extracted_word_count(blocks: list[dict[str, Any]]) -> int:
-    """Counts words in the extracted blocks. For table blocks, counts
-    raw_grid (every cell found), not just the structured rows -- this is
-    about whether content was visited at all, which is check_table_coverage's
-    job to further check for classification loss."""
+    """Counts words in the extracted blocks, including every raw table cell."""
     count = 0
     for block in blocks:
         if block.get("type") == "table":
@@ -1033,13 +937,8 @@ def _extracted_word_count(blocks: list[dict[str, Any]]) -> int:
 
 
 def check_document_coverage(file_path: str | Path, blocks: list[dict[str, Any]]) -> Optional[str]:
-    """Coarse sanity check: does roughly as much text end up in the
-    extracted blocks as exists in the source? A large shortfall flags
-    content the block-building loop never visited (e.g. a PPTX GROUP
-    shape). A coverage ratio, not an exact diff. Returns a warning string
-    if coverage drops below DOCUMENT_COVERAGE_WARNING_THRESHOLD, else None.
-    Re-reads the source file, so this does real I/O -- fine at ingestion
-    time, not for per-query use."""
+    """Coarse check: does roughly as much text end up in the blocks as
+    exists in the source? A large shortfall means content was missed."""
     raw_count = _raw_word_count(file_path)
     if not raw_count:
         return None
@@ -1081,14 +980,8 @@ def extract_blocks(file_path: str | Path) -> list[dict[str, Any]]:
 
 
 def load_document(file_path: str | Path, verbose: bool = True) -> dict[str, Any]:
-    """Loads any supported file into readable text plus ordered blocks.
-
-    Runs two coverage checks and surfaces them under "warnings" on the
-    returned dict: check_table_coverage per table (cells lost during
-    classification) and check_document_coverage for the whole file
-    (content the extractor's loop never visited at all). With verbose=True
-    (default), warnings also print to stderr immediately.
-    """
+    """Loads a file into readable text plus ordered blocks, along with any
+    coverage warnings."""
     path = Path(file_path)
     blocks = extract_blocks(path)
 
@@ -1123,7 +1016,7 @@ def load_document(file_path: str | Path, verbose: bool = True) -> dict[str, Any]
     }
 
 
-# Backward-compatible alias -- existing callers using load_docx() keep working.
+# Backward-compatible alias for older callers.
 def load_docx(file_path: str | Path, verbose: bool = True) -> dict[str, Any]:
     return load_document(file_path, verbose=verbose)
 

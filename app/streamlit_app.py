@@ -12,18 +12,11 @@ from pathlib import Path
 import streamlit as st
 from dotenv import load_dotenv
 
-# Loaded explicitly here rather than relying on it happening as a side
-# effect of importing app.retriever below -- ADMIN_PASSWORD is read from
-# the environment a few lines down, and that shouldn't depend on another
-# module's import order to work.
+# Load .env explicitly since ADMIN_PASSWORD is read from it below.
 load_dotenv()
 
-# `streamlit run app/streamlit_app.py` sets sys.path[0] to this file's own
-# directory (app/), not the project root, regardless of the cwd the command
-# was run from -- so the `app.*` imports below would fail with "No module
-# named 'app'" without this, even though every other module in this project
-# resolves them fine (they're run via `python -m app.X`, which puts the cwd
-# on sys.path instead).
+# Streamlit sets the working directory to this file's folder, not the
+# project root, so add the root to sys.path for the app.* imports below.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.admin_page import render_admin_page
@@ -34,10 +27,8 @@ from app.retriever import RetrieverError
 APPROVED_DOCS_DIR = Path("data/approved_docs")
 
 def get_admin_password() -> str:
-    """Reads ADMIN_PASSWORD from st.secrets, then the environment (.env).
-    No hardcoded fallback -- an empty return correctly triggers the "not
-    set" error shown below instead of silently accepting a guessable
-    default password."""
+    """Reads the admin password from secrets, then the environment. No
+    hardcoded fallback -- an empty return triggers the "not set" error below."""
     try:
         return st.secrets["ADMIN_PASSWORD"]
     except (KeyError, FileNotFoundError, st.errors.StreamlitSecretNotFoundError):
@@ -86,13 +77,12 @@ RISK_COLORS = {
 # Copy-to-clipboard button (Streamlit has no native one)
 # ---------------------------------------------------------------------------
 def copy_button(text: str, label: str = "Copy answer", key: str = ""):
-    # Sanitize the DOM id so it can't break out of the id="..." / JS string it's used in.
+    # Sanitize so the id can't break out of the id="..." / JS string it's used in.
     safe_id = "copy-btn-" + re.sub(r"[^a-zA-Z0-9_-]", "", key)
-    # json.dumps gives a JS-safe quoted string; html.escape then makes it
-    # safe inside a double-quoted HTML attribute (onclick="...").
+    # json.dumps gives a JS-safe quoted string; html.escape makes it safe
+    # inside the double-quoted onclick="..." attribute.
     safe_text = html.escape(json.dumps(text))
     safe_label = html.escape(label)
-    # components.html is deprecated as of Streamlit 1.56; st.iframe replaces it.
     st.iframe(
         f"""
         <button id="{safe_id}" onclick="
@@ -110,10 +100,10 @@ def copy_button(text: str, label: str = "Copy answer", key: str = ""):
 
 
 # ---------------------------------------------------------------------------
-# Sidebar: knowledge base status + admin upload (per spec 12.4 - optional)
+# Sidebar: knowledge base status + admin sign-in
 # ---------------------------------------------------------------------------
 def count_approved_docs() -> int:
-    """Counts files in data/approved_docs. Swap for your indexer's real doc count if it tracks one already."""
+    """Counts files in data/approved_docs."""
     if not APPROVED_DOCS_DIR.exists():
         return 0
     return sum(1 for p in APPROVED_DOCS_DIR.iterdir() if p.is_file())
@@ -219,8 +209,7 @@ def render_assistant_page() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Navigation -- the Admin page is only added to the page list (and so only
-# reachable/visible) once the sidebar password gate above has passed.
+# Navigation -- Admin page only appears once the sidebar password gate passes.
 # ---------------------------------------------------------------------------
 pages = [st.Page(render_assistant_page, title="Assistant", icon="💬", default=True)]
 if st.session_state.admin_authenticated:

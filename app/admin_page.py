@@ -1,8 +1,6 @@
 """Admin page: document management, index rebuilds, and claims-policy
-editing. Only reachable once app/streamlit_app.py has added it to
-st.navigation() -- which it only does after the sidebar password gate
-passes -- but render_admin_page() re-checks session state itself too, in
-case this module is ever called from somewhere that skips that gate.
+editing. render_admin_page() re-checks the sign-in state itself, in case
+it's ever reached without going through the sidebar gate first.
 """
 from __future__ import annotations
 
@@ -30,15 +28,11 @@ RESTRICTED_CLAIMS_PATH = Path("data/restricted_claims.yaml")
 
 
 # ---------------------------------------------------------------------------
-# Rebuild Index status bar (shown above every tab, not just Documents --
-# rebuilding only makes sense in light of the current document list)
+# Rebuild Index status bar (shown above every tab)
 # ---------------------------------------------------------------------------
 def _approved_doc_paths() -> list[Path]:
-    """Only files load_and_chunk_approved_docs() will actually pick up --
-    an unsupported file sitting in the folder (e.g. the .xlsx whose
-    content is separately covered by a .csv copy) is real on disk but
-    contributes zero chunks, so listing it here would misrepresent what's
-    actually indexed."""
+    """Only files that are actually indexable -- an unsupported file in the
+    folder is real on disk but contributes zero chunks."""
     if not APPROVED_DOCS_DIR.exists():
         return []
     return sorted(
@@ -146,9 +140,8 @@ def _render_documents_tab() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Approved Claims tab -- plain reference documentation. Nothing in
-# app/claim_checker.py reads this file; it's for human review only (spec
-# 8.2/12.3), so a flat prose bullet list stays the right editor for it.
+# Approved Claims tab -- plain reference documentation for human review;
+# nothing here is actually enforced by the assistant.
 # ---------------------------------------------------------------------------
 def _render_approved_claims_tab() -> None:
     header, bullets = load_claims(APPROVED_CLAIMS_PATH)
@@ -169,11 +162,8 @@ def _render_approved_claims_tab() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Restricted Claims tab -- this IS what app/claim_checker.py enforces
-# (loaded from data/restricted_claims.yaml, see app/restricted_policy.py),
-# so it needs the structured fields enforcement actually uses, not just
-# free text: category, the keyword(s) that trigger it, and whether a match
-# is always blocked regardless of retrieved evidence.
+# Restricted Claims tab -- this is what the assistant actually enforces, so
+# it needs structured fields, not just free text.
 # ---------------------------------------------------------------------------
 def _entries_to_rows(entries: list[PolicyEntry]) -> pd.DataFrame:
     return pd.DataFrame(

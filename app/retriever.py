@@ -24,42 +24,23 @@ CHUNK_TEXT_KEY = "text"
 INDEX_DIR = Path(os.environ.get("VECTOR_DB_PATH", "data/chroma_index"))
 COLLECTION_NAME = "approved_docs"
 
-# Chroma's own default index space is squared L2, not cosine -- set this
-# explicitly wherever the collection is created so retrieve()'s "1 -
-# distance" similarity conversion is actually valid.
+# Chroma defaults to squared L2 distance, not cosine -- set this explicitly
+# so the "1 - distance" similarity conversion below is valid.
 COLLECTION_METADATA = {"hnsw:space": "cosine"}
 EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
 EMBEDDING_PROVIDER = os.environ.get("EMBEDDING_PROVIDER", "local")
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "text-embedding-3-small")
 
-# Texts are embedded/added to Chroma in batches rather than all at once, to
-# keep memory bounded for a large index build.
+# Batches embedding calls to keep memory bounded for a large index build.
 EMBED_BATCH_SIZE = 64
 
-# Per spec 12.2: below this similarity, treat retrieval as a miss.
-#
-# Calibrated against this project's actual embedding config (OpenAI
-# text-embedding-3-small, cosine space), not a generic default: sampled
-# top-1 similarity for off-topic questions tops out around 0.15, for
-# on-topic-but-genuinely-unsupported questions (e.g. exact pricing, which
-# the docs never cover) around 0.27, and for real, answerable questions
-# starts around 0.37. 0.32 sits in that real gap. Different embedding
-# providers/models have different score distributions -- re-sample before
-# reusing this value elsewhere.
+# Below this similarity, treat retrieval as a miss. Calibrated against
+# sampled scores for this embedding model -- re-sample if the model changes.
 NO_MATCH_THRESHOLD = float(os.environ.get("RETRIEVER_NO_MATCH_THRESHOLD", 0.32))
 
-# Per spec 12.2: between NO_MATCH_THRESHOLD and this, answer with low confidence.
-#
-# The naive read of the sampled gap here (weak/indirect matches topping out
-# ~0.45, direct hits on approved content starting ~0.58) suggests anywhere
-# in that range works. It doesn't: several catalogues share a near-identical
-# generic "Product Benefits" boilerplate paragraph that acts as a similarity
-# magnet -- e.g. "How is the leak detector packaged for shipping?" (a
-# question the docs don't actually answer) scores 0.5431 against that
-# paragraph alone. A threshold below that would label a non-answer "high
-# confidence", which is the inflation this must NOT do. 0.56 sits just
-# above that confirmed bad match and just below the lowest confirmed direct
-# hit (0.5840). Narrow margin -- re-sample if it starts misclassifying.
+# Between NO_MATCH_THRESHOLD and this, answer with low confidence. A shared
+# boilerplate paragraph across documents can inflate unrelated questions'
+# scores, so this sits above that rather than in the middle of the gap.
 LOW_CONFIDENCE_THRESHOLD = float(os.environ.get("RETRIEVER_LOW_CONFIDENCE_THRESHOLD", 0.56))
 
 _embedder: Optional[SentenceTransformer] = None
@@ -74,13 +55,9 @@ class RetrieverError(RuntimeError):
 # Embedding
 # ---------------------------------------------------------------------------
 def get_embedder() -> SentenceTransformer:
-    """Loads the embedding model once and reuses it.
-
-    Imports sentence_transformers here, not at module level: it pulls in
-    torch/transformers, a ~20s import that's pure dead weight whenever
-    EMBEDDING_PROVIDER=openai (this project's actual default deployment
-    config) never calls this function at all.
-    """
+    """Loads the embedding model once and reuses it. Imported lazily since
+    sentence_transformers pulls in torch, which isn't needed for the OpenAI
+    provider."""
     global _embedder
     if _embedder is None:
         try:
@@ -125,9 +102,8 @@ def _embed_batch(batch: list[str]) -> list[list[float]]:
 
 
 def embed_texts(texts: list[str]) -> list[list[float]]:
-    """Turns texts into embedding vectors in batches of EMBED_BATCH_SIZE.
-    Provider is controlled by EMBEDDING_PROVIDER -- this is the only place
-    that decision is made."""
+    """Turns texts into embedding vectors in batches, using whichever
+    provider is configured."""
     if not texts:
         return []
 
@@ -171,7 +147,7 @@ def index_size() -> int:
 
 
 # ---------------------------------------------------------------------------
-# Build / rebuild the index (spec 12.1)
+# Build / rebuild the index
 # ---------------------------------------------------------------------------
 def _validate_chunks(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Skips chunks missing a usable CHUNK_TEXT_KEY instead of letting a
@@ -191,9 +167,9 @@ def _validate_chunks(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _dedupe_chunks(chunks: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[str]]:
-    """Drops exact-duplicate chunk text (content-based, keeping the first
-    occurrence). Returns (deduped_chunks, content_hash_per_chunk) -- the
-    hashes double as stable, deterministic Chroma IDs in build_index."""
+    """Drops exact-duplicate chunk text, keeping the first occurrence.
+    Returns the deduped chunks along with a content hash per chunk, used
+    as stable Chroma IDs."""
     seen: set[str] = set()
     deduped: list[dict[str, Any]] = []
     hashes: list[str] = []
@@ -233,12 +209,11 @@ def build_index(chunks: list[dict[str, Any]]) -> int:
 
     client = get_client()
 
-    # Drop and recreate the collection so chunks from deleted/edited
-    # documents don't linger from a previous index build.
+    # Drop and recreate the collection so old chunks don't linger.
     try:
         client.delete_collection(COLLECTION_NAME)
     except Exception:
-        pass  # fine if it didn't exist yet (first-ever build)
+        pass  # didn't exist yet
 
     try:
         collection = client.get_or_create_collection(COLLECTION_NAME, metadata=COLLECTION_METADATA)
@@ -246,8 +221,7 @@ def build_index(chunks: list[dict[str, Any]]) -> int:
         raise RetrieverError(f"Failed to create collection '{COLLECTION_NAME}': {e}") from e
 
     texts = [c[CHUNK_TEXT_KEY] for c in deduped_chunks]
-    # Chroma rejects None as a metadata value, so drop any key whose value
-    # is None (e.g. a docx/pdf chunk's absent slide_number) before sending.
+    # Chroma rejects None as a metadata value, so drop any keys set to None.
     metadatas = [
         {k: v for k, v in c.items() if k != CHUNK_TEXT_KEY and v is not None}
         for c in deduped_chunks
@@ -271,17 +245,11 @@ def build_index(chunks: list[dict[str, Any]]) -> int:
 
 
 # ---------------------------------------------------------------------------
-# "List all products" queries (spec 12.2 extension)
+# "List all products" queries
 # ---------------------------------------------------------------------------
-# Top-k nearest-neighbor search answers "which chunks best match this
-# text", not "enumerate every product" -- with more distinct products in
-# the corpus than top_k, something is always dropped, and which one is
-# arbitrary (whichever chunks happen to be worded less similarly to the
-# question), not a reflection of which products exist. Detected by keyword
-# pattern rather than similarity, consistent with this project's existing
-# deterministic, keyword-based classification (see intent.py,
-# claim_checker.py) -- "enumerate everything" isn't itself a
-# similarity-driven question.
+# Top-k search answers "which chunks best match this text", not "enumerate
+# every product" -- with more products than top_k, one always gets dropped
+# arbitrarily. Detected by keyword pattern instead.
 _LIST_ALL_PRODUCTS_PATTERNS = [
     re.compile(r"\ball\b.{0,15}\bproducts?\b", re.IGNORECASE),
     re.compile(r"\bwhat\b.{0,10}\bproducts?\b.{0,15}\b(available|offer|have|sell|make)\b", re.IGNORECASE),
@@ -296,9 +264,7 @@ def _is_list_all_products_query(query: str) -> bool:
 
 def _retrieve_one_per_document(query_embedding: list[list[float]], collection) -> list[dict[str, Any]]:
     """One best-matching chunk per distinct document instead of a single
-    global top-k, so every indexed product is represented at least once.
-    Reuses the same per-chunk similarity search as retrieve()'s normal
-    path, just partitioned by document via Chroma's `where` filter."""
+    global top-k, so every indexed product is represented at least once."""
     all_metadata = collection.get(include=["metadatas"])["metadatas"]
     document_names = sorted({m["document_name"] for m in all_metadata})
 
@@ -324,19 +290,11 @@ def _retrieve_one_per_document(query_embedding: list[list[float]], collection) -
 
 
 # ---------------------------------------------------------------------------
-# Retrieval (spec 12.2)
+# Retrieval
 # ---------------------------------------------------------------------------
 def retrieve(query: str, top_k: int = 5) -> dict[str, Any]:
-    """Retrieves the top_k most relevant chunks for a question.
-
-    Per spec 12.2: confidence is "none" (empty matches) if nothing clears
-    NO_MATCH_THRESHOLD, "low" if the best match is below
-    LOW_CONFIDENCE_THRESHOLD, else "high".
-
-    Returns:
-        {"matches": [{"text", "metadata", "similarity"}, ...],
-         "confidence": "high" | "low" | "none"}
-    """
+    """Retrieves the top_k most relevant chunks for a question, along with
+    a confidence level ("high", "low", or "none") based on similarity."""
     collection = get_collection()
 
     try:
@@ -372,9 +330,8 @@ def retrieve(query: str, top_k: int = 5) -> dict[str, Any]:
             similarity = 1 - distance
             matches.append({"text": text, "metadata": metadata, "similarity": similarity})
 
-    # max() rather than matches[0]: the list-all-products branch above
-    # orders matches by document name for a readable enumeration, not by
-    # similarity, so the top-ranked match isn't necessarily first anymore.
+    # max() not matches[0]: the list-all-products branch orders by document
+    # name for readability, not similarity.
     best_similarity = max((m["similarity"] for m in matches), default=0.0)
 
     if not matches or best_similarity < NO_MATCH_THRESHOLD:
@@ -387,10 +344,7 @@ def retrieve(query: str, top_k: int = 5) -> dict[str, Any]:
     return {"matches": matches, "confidence": confidence}
 
 
-# ---------------------------------------------------------------------------
-# Wiring to document_loader.py + chunker.py
-# ---------------------------------------------------------------------------
-# Kept in sync by hand with document_loader.py's _EXTRACTORS keys.
+# File types the loader can handle -- keep in sync with the loader's own list.
 SUPPORTED_DOC_EXTENSIONS = {".docx", ".pptx", ".pdf", ".csv", ".xlsx", ".md", ".markdown", ".txt"}
 
 
@@ -424,8 +378,7 @@ def load_and_chunk_approved_docs(docs_dir: str | Path = "data/approved_docs") ->
 
 
 # ---------------------------------------------------------------------------
-# CLI: rebuild the index, or -- if a question is given as an argument --
-# debug-print what retrieve() finds for it, without touching indexing.
+# CLI: rebuild the index, or debug-print retrieve() results for a question.
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     if len(sys.argv) > 1:

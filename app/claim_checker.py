@@ -1,24 +1,6 @@
 #python -m app.claim_checker
-"""Implements the "Claim checker" component (spec 4.1) and the claim-
-checking rules in Implementation Details 12.3: scans a question and its
-draft answer for restricted-claim terms, decides which risk category
-applies, and blocks customer-facing wording when a matched term isn't
-backed by the actual retrieved source text.
-
-Deliberately keyword-based, not an LLM/ML classifier -- spec 12.3: "Keep
-this simple initially using keyword rules; ML classification can be a
-later improvement." Same reasoning as intent.py's classifier.
-
-Risk categories match streamlit_app.py's RISK_COLORS keys exactly: None,
-Certification, Accuracy, Safety, Pricing, Legal, Delivery.
-
-The actual keyword/category/always-unsupported policy lives in
-data/restricted_claims.yaml (see app/restricted_policy.py), not here --
-it's edited through the Admin page, and _load_policy() below picks up
-changes automatically (checked by file mtime, so a save takes effect on
-the very next check without restarting the app, but repeated checks
-against an unchanged file don't reparse it every time).
-"""
+"""Flags restricted claims (certifications, pricing, safety, etc.) in a
+question or answer and checks whether they're backed by the source text."""
 from __future__ import annotations
 
 import re
@@ -33,14 +15,11 @@ NONE_CATEGORY = "None"
 
 POLICY_PATH = Path("data/restricted_claims.yaml")
 
-# (mtime the cache was built from, categories dict, always_unsupported set)
 _policy_cache: Optional[tuple[float, dict[str, list[str]], set[str]]] = None
 
 
 def _load_policy() -> tuple[dict[str, list[str]], set[str]]:
-    """Categories are checked in the order they first appear in the policy
-    file (first matching category wins) -- mirrors the old hardcoded
-    dict's insertion-order behaviour, just sourced from disk now."""
+    """Loads and caches the restricted-claims policy."""
     global _policy_cache
 
     try:
@@ -65,22 +44,14 @@ def _contains_term(text: str, term: str) -> bool:
     return re.search(pattern, text) is not None
 
 
-# "approved"/"approval" are unambiguous when a user asks them ("Is this
-# approved for X?"), but not when they show up in the LLM's OWN answer
-# text: the system prompt requires it to talk about the "approved
-# knowledge base"/"approved information" even when saying it found
-# nothing, so an ordinary "the approved excerpts do not specify X" answer
-# would otherwise falsely trigger Certification on every single
-# unrelated, unsupported-looking answer. Excluded only from answer-text
-# classification below, not from the question.
+# Answers mention "approved" even when nothing was found, so exclude it
+# here to avoid false Certification flags on ordinary not-found replies.
 ANSWER_TEXT_EXCLUDED_TERMS = {"approved", "approval"}
 
 
 def _classify_category(text: str, exclude: set[str] = frozenset()) -> tuple[str, list[str]]:
-    """Returns (category, matched_terms) for the first category (in
-    policy-file order, see _load_policy) with any term present in `text`
-    (skipping any term in `exclude`), or (NONE_CATEGORY, []) if nothing
-    restricted was found."""
+    """Returns the first matching category and its matched terms, or
+    (NONE_CATEGORY, []) if nothing matches."""
     categories, _ = _load_policy()
     for category, terms in categories.items():
         matched = [t for t in terms if t not in exclude and _contains_term(text, t)]
@@ -91,22 +62,8 @@ def _classify_category(text: str, exclude: set[str] = frozenset()) -> tuple[str,
 
 @dataclass
 class ClaimCheckResult:
-    """category is one of the categories named in data/restricted_claims.yaml,
-    or "None" if nothing restricted was found in the question or draft answer.
-
-    is_blocked is True when a restricted term was matched AND that term
-    does not itself appear anywhere in the retrieved source text (spec
-    12.3: "If the claim is unsupported, block external wording and
-    request human review."). This checks the actual evidence text, not
-    retrieval similarity -- a claim can be well-supported even at Low
-    confidence (e.g. the exact restricted term is present in a chunk that
-    just didn't rank as similar as it could have), and conversely a
-    confidently-retrieved chunk doesn't make an answer that goes beyond
-    what that chunk actually says any less unsupported.
-
-    unsupported_terms lists which matched terms specifically weren't found
-    in the source text -- this is why a result is blocked, for auditability.
-    """
+    """Result of a claim check: the risk category, whether it's blocked,
+    and which terms triggered that."""
 
     category: str
     is_blocked: bool
@@ -115,22 +72,9 @@ class ClaimCheckResult:
 
 
 def check_restricted_claims(question: str, answer_text: str, source_text: str) -> ClaimCheckResult:
-    """Scans both the question and the draft answer (spec 12.3) for
-    restricted-claim terms. The question's category takes priority when
-    both are present (it's the more reliable signal of what's actually
-    being asked); matched_terms is the union of both, for auditability.
-    ANSWER_TEXT_EXCLUDED_TERMS is skipped when classifying answer_text
-    specifically (see its own docstring).
-
-    source_text is the retrieved evidence actually cited as sources for
-    this answer (e.g. the concatenated text of retriever.retrieve()'s
-    matches) -- a term is "supported" only if it appears there too, unless
-    its policy entry has always_unsupported: true (flat denials like
-    ATEX/CE/the MEMS gas list, where source-text presence doesn't mean
-    confirmation -- see data/restricted_claims.yaml). Pass an empty string
-    when there were no sources at all; every matched term is then
-    correctly unsupported.
-    """
+    """Checks a question and its draft answer for restricted claims, and
+    determines whether each one is backed by source_text. Pass an empty
+    source_text if there were no sources -- every match is then unsupported."""
     question_norm = _normalize(question)
     answer_norm = _normalize(answer_text)
     source_norm = _normalize(source_text)
@@ -170,8 +114,7 @@ if __name__ == "__main__":
             "The product is certified for hazardous area use according to IS/IEC "
             "standards and is PESO approved for Zone 1 Gas Group IIC, but there is "
             "no explicit mention of ATEX certification.",
-            # Real retrieved evidence never mentions ATEX (it's "in process",
-            # per data/restricted_claims.yaml) -- "atex" stays unsupported.
+            # ATEX certification is still pending, so this stays unsupported.
             "FIXaHY is PESO approved for Gas Group IIC Zone 1. Tested at a "
             "3rd party BASEEFA accredited lab per IS/IEC 60079-11 and 60079-0.",
             "Certification", True,
@@ -180,8 +123,7 @@ if __name__ == "__main__":
             "Is the FIXaHY sensor PESO approved for hazardous areas?",
             "Yes, the FIXaHY sensor is PESO approved for hazardous areas, "
             "specifically for Gas Group IIC Zone 1.",
-            # Same evidence, but here the matched terms (peso, approved,
-            # hazardous area, gas group, zone 1) all appear in it verbatim.
+            # Same evidence, but this time it's stated explicitly.
             "FIXaHY-G/P/E-4220MA-RRNNVVII - PESO Approved for Gas Group IIC "
             "Zone 1. The product is approved by PESO for deployment in "
             "hazardous area Zone 1.",
@@ -202,10 +144,7 @@ if __name__ == "__main__":
             "Pricing", False,
         ),
         (
-            # Real reported bug: an ordinary "not found" answer's own
-            # boilerplate ("the approved excerpts...") was misread as a
-            # certification claim. Nothing restricted is actually being
-            # asked or claimed here.
+            # A generic "not found" reply shouldn't be flagged as a claim.
             "What is the weight of the VISION H2 LD device?",
             "The approved excerpts do not specify the weight of the VISION H2 LD device.",
             "Product Ordering Information: users can select the variant "
@@ -213,10 +152,8 @@ if __name__ == "__main__":
             "None", False,
         ),
         (
-            # Per data/restricted_claims.yaml: this is the MEMS platform's
-            # roadmap target, not any current product's spec -- must be
-            # blocked even though the roadmap slide's own text (used here
-            # as source_text) genuinely contains all these gas names.
+            # A future roadmap feature, not a current product -- should
+            # block even though the source text mentions these gases.
             "What gases can the MEMS sensor detect besides hydrogen?",
             "Besides hydrogen, the MEMS sensor can detect helium, methane, SF6, "
             "hydrocarbons, and refrigerants.",
@@ -225,9 +162,7 @@ if __name__ == "__main__":
             "Accuracy", True,
         ),
         (
-            # Source-text presence alone would wrongly call this
-            # "supported": the real approved deck's own line literally
-            # contains the word "atex" while denying the claim.
+            # The word "atex" appears in the source, but only to deny it.
             "Is this ATEX certified?",
             "Yes, the product is ATEX certified.",
             "Designed for regulated industrial and safety applications; "
@@ -243,8 +178,7 @@ if __name__ == "__main__":
             "Certification", True,
         ),
         (
-            # The case this whole change was about: real evidence, Low
-            # similarity score -- must NOT be blocked now.
+            # Weak match, but the claim is genuinely supported.
             "Can AURIGA be deployed in a hazardous area?",
             "No, the AURIGA Portable Hydrogen Leak Detector should not be "
             "deployed in hazardous areas.",
@@ -253,8 +187,7 @@ if __name__ == "__main__":
             "Certification", False,
         ),
         (
-            # A confidence-based check would have missed this: good retrieval,
-            # but the answer claims something the source never states.
+            # Good retrieval, but the answer claims more than the source says.
             "Is the FIXaHY sensor ATEX certified?",
             "Yes, the FIXaHY sensor is ATEX certified for hazardous areas.",
             "FIXaHY-G/P/E-4220MA-RRNNVVII - PESO Approved for Gas Group IIC "
