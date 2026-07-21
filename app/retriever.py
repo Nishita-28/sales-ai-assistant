@@ -1,15 +1,18 @@
 #python -m app.retriever
+from __future__ import annotations
 
 import hashlib
 import os
 import re
 import sys
 from pathlib import Path
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import chromadb
 from dotenv import load_dotenv
-from sentence_transformers import SentenceTransformer
+
+if TYPE_CHECKING:
+    from sentence_transformers import SentenceTransformer
 
 load_dotenv()
 
@@ -71,10 +74,17 @@ class RetrieverError(RuntimeError):
 # Embedding
 # ---------------------------------------------------------------------------
 def get_embedder() -> SentenceTransformer:
-    """Loads the embedding model once and reuses it."""
+    """Loads the embedding model once and reuses it.
+
+    Imports sentence_transformers here, not at module level: it pulls in
+    torch/transformers, a ~20s import that's pure dead weight whenever
+    EMBEDDING_PROVIDER=openai (this project's actual default deployment
+    config) never calls this function at all.
+    """
     global _embedder
     if _embedder is None:
         try:
+            from sentence_transformers import SentenceTransformer
             _embedder = SentenceTransformer(EMBEDDING_MODEL_NAME)
         except Exception as e:
             raise RetrieverError(f"Failed to load embedding model '{EMBEDDING_MODEL_NAME}': {e}") from e
@@ -381,7 +391,7 @@ def retrieve(query: str, top_k: int = 5) -> dict[str, Any]:
 # Wiring to document_loader.py + chunker.py
 # ---------------------------------------------------------------------------
 # Kept in sync by hand with document_loader.py's _EXTRACTORS keys.
-SUPPORTED_DOC_EXTENSIONS = {".docx", ".pptx", ".pdf", ".csv", ".md", ".markdown", ".txt"}
+SUPPORTED_DOC_EXTENSIONS = {".docx", ".pptx", ".pdf", ".csv", ".xlsx", ".md", ".markdown", ".txt"}
 
 
 def load_and_chunk_approved_docs(docs_dir: str | Path = "data/approved_docs") -> list[dict[str, Any]]:

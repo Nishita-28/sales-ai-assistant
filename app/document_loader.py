@@ -296,9 +296,11 @@ def _detect_table_style(grid: list[list[str]], is_bold_fn: IsBoldFn) -> str:
 
 
 def _collect_table_output_texts(block: dict[str, Any]) -> Counter[str]:
-    """Counts every text value that made it into a table block's structured
-    output. Uses counts, not a set of unique strings -- a set would treat a
-    value appearing twice as "covered" even if only one occurrence survived."""
+    """Counts every DATA text value that made it into a table block's
+    structured output -- deliberately not header-row cells (see
+    check_table_coverage for why those aren't verified here). Uses
+    counts, not a set of unique strings -- a set would treat a value
+    appearing twice as "covered" even if only one occurrence survived."""
     counts: Counter[str] = Counter()
     style = block.get("style", "header")
 
@@ -310,16 +312,16 @@ def _collect_table_output_texts(block: dict[str, Any]) -> Counter[str]:
                 counts[row["value"]] += 1
             if row.get("subsection"):
                 counts[row["subsection"]] += 1
-        # Row 0 is either genuine data (already counted above) or an
-        # intentionally-skipped header row -- either way it's not lost.
+        # Row 0 is either genuine data (already counted above --
+        # _build_keyvalue_table only skips it when it's a real bold
+        # header row) or a skipped header row -- either way it's
+        # accounted for. Credit it unconditionally rather than trying to
+        # tell which case applies from the structured output alone.
         raw_grid = block.get("raw_grid", [])
         if raw_grid:
             counts.update(_row_raw_text_counts(raw_grid[0]))
 
     elif style == "complex":
-        for c in block.get("columns", []):
-            if c:
-                counts[c] += 1
         for row in block.get("top_level_rows", []):
             if row.get("row_label"):
                 counts[row["row_label"]] += 1
@@ -340,9 +342,6 @@ def _collect_table_output_texts(block: dict[str, Any]) -> Counter[str]:
                     counts[o] += 1
 
     else:  # "header" / simple
-        for c in block.get("columns", []):
-            if c:
-                counts[c] += 1
         for row in block.get("rows", []):
             if row.get("row_label"):
                 counts[row["row_label"]] += 1
@@ -354,19 +353,41 @@ def _collect_table_output_texts(block: dict[str, Any]) -> Counter[str]:
 
 
 def check_table_coverage(block: dict[str, Any]) -> list[str]:
-    """Compares a table block's raw_grid against its structured output and
-    returns any cell text that was silently dropped during classification.
-    Empty list means nothing was lost. Compares by count, not just
-    presence, so a value appearing twice but surviving only once is still
-    reported.
+    """Compares a table block's raw_grid DATA rows against its structured
+    output and returns any cell text that was silently dropped during
+    classification. Empty list means nothing was lost.
 
-    Known limitation: composite column-header dedup (two columns both
-    named "Weight" become "Weight" / "Weight (2)") can show up here as one
-    "Weight" apparently missing -- it's just renamed, not lost.
+    Header rows are deliberately excluded from this comparison, for every
+    style: _build_composite_columns, _build_simple_table, and
+    _build_keyvalue_table all fold every header-row cell into some
+    structured field by construction (a composite column name, a
+    "(2)"-suffixed duplicate name, or an unconditionally-credited row 0)
+    -- there is no code path where a header cell's raw text is silently
+    discarded, so it doesn't need independent verification. An earlier
+    version of this function tried to verify header cells anyway, by
+    reverse-parsing the joined output text back into its original pieces
+    (splitting a composite column name on " - ", stripping a trailing
+    "(2)"). That's unreliable: a composite name like "International
+    Business through Distributor - 21Senses Inc. - Sr No" can't be split
+    back into its real parts by looking for " - ", because the original
+    header text itself already contained " - " as ordinary punctuation,
+    indistinguishable after the fact from the join separator. Comparing
+    only the data rows -- the rows a real classification bug could
+    actually drop -- avoids that whole false-positive class structurally,
+    rather than trying to out-guess it with more string matching.
     """
     raw_grid = block.get("raw_grid", [])
+    style = block.get("style", "header")
+
+    if style == "complex":
+        header_row_count = _detect_header_row_count(raw_grid)
+    elif style == "header":
+        header_row_count = 1
+    else:  # "keyvalue": no fixed header-row count -- row 0 handled specially above
+        header_row_count = 0
+
     raw_counts: Counter[str] = Counter()
-    for row in raw_grid:
+    for row in raw_grid[header_row_count:]:
         raw_counts.update(_row_raw_text_counts(row))
 
     output_counts = _collect_table_output_texts(block)
@@ -429,6 +450,36 @@ def resolve_table_grid(table) -> list[list[str]]:
     return grid
 
 
+# Word wraps every text box in <mc:AlternateContent>, with TWO
+# functionally-identical renderings of the SAME text as siblings: a modern
+# DrawingML <mc:Choice> and a legacy VML <mc:Fallback>, kept for
+# compatibility with readers that don't support one or the other. Only one
+# is real content -- extracting both would duplicate every text box
+# verbatim. "mc" isn't in python-docx's own qn() namespace map, hence the
+# literal URIs rather than qn("mc:...").
+_MC_NS = "http://schemas.openxmlformats.org/markup-compatibility/2006"
+_MC_ALTERNATE_CONTENT = f"{{{_MC_NS}}}AlternateContent"
+_MC_CHOICE = f"{{{_MC_NS}}}Choice"
+_MC_FALLBACK = f"{{{_MC_NS}}}Fallback"
+
+
+def _iter_textbox_paragraph_elements(paragraph_element):
+    """Yields <w:p> elements from inside any text box(es) anchored to this
+    paragraph (preferring each AlternateContent's Choice branch over its
+    Fallback -- see module comment above). A paragraph with no text boxes
+    yields nothing."""
+    from docx.oxml.ns import qn
+
+    for alt in paragraph_element.iter(_MC_ALTERNATE_CONTENT):
+        source = alt.find(_MC_CHOICE)
+        if source is None:
+            source = alt.find(_MC_FALLBACK)
+        if source is None:
+            continue
+        for txbx in source.iter(qn("w:txbxContent")):
+            yield from txbx.iter(qn("w:p"))
+
+
 def _paragraph_type_docx(paragraph) -> str:
     style_name = ""
     if paragraph.style is not None and paragraph.style.name:
@@ -468,17 +519,38 @@ def extract_docx_blocks(file_path: str | Path) -> list[dict[str, Any]]:
         if tag == "p":
             paragraph = Paragraph(element, document)
             text = _clean_text(paragraph.text)
-            if not text:
-                continue
-            block_type = _paragraph_type_docx(paragraph)
-            if block_type == "heading":
-                current_section = text
-            blocks.append({
-                "type": block_type,
-                "text": text,
-                "metadata": {"filename": filename, "block_index": block_index, "section_title": current_section or None},
-            })
-            block_index += 1
+            if text:
+                block_type = _paragraph_type_docx(paragraph)
+                if block_type == "heading":
+                    current_section = text
+                blocks.append({
+                    "type": block_type,
+                    "text": text,
+                    "metadata": {"filename": filename, "block_index": block_index, "section_title": current_section or None},
+                })
+                block_index += 1
+
+            # A text box's anchor paragraph is often otherwise empty (the
+            # visible text lives entirely inside the box), so this must
+            # run regardless of whether the paragraph itself had text --
+            # see _iter_textbox_paragraph_elements.
+            for tb_element in _iter_textbox_paragraph_elements(element):
+                tb_paragraph = Paragraph(tb_element, document)
+                tb_text = _clean_text(tb_paragraph.text)
+                if not tb_text:
+                    continue
+                # Doesn't update current_section even if this classifies
+                # as a heading: a text box is a floating/anchored caption,
+                # not part of the normal reading flow, so letting it
+                # override the section context for whatever normal-flow
+                # content follows would be more likely to mislabel later
+                # blocks than to correctly describe them.
+                blocks.append({
+                    "type": _paragraph_type_docx(tb_paragraph),
+                    "text": tb_text,
+                    "metadata": {"filename": filename, "block_index": block_index, "section_title": current_section or None},
+                })
+                block_index += 1
 
         elif tag == "tbl":
             table = document.tables[table_index]
@@ -675,6 +747,75 @@ def extract_csv_blocks(file_path: str | Path) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# XLSX -- one table block per worksheet, using the same header/section
+# detection as docx/pptx tables (unlike CSV, real bold formatting is
+# available here, so multi-level headers and bold section rows can
+# actually be detected instead of falling back to "header" style always).
+# ---------------------------------------------------------------------------
+
+def _read_xlsx_sheet_grid(worksheet) -> tuple[list[list[str]], list[list[Any]]]:
+    """Returns (text_grid, cell_rows): cell_rows holds the real openpyxl
+    Cell objects at the same [row][col] positions as text_grid, so bold
+    formatting can still be looked up after blank rows are dropped.
+    Fully-blank rows are dropped entirely -- large spreadsheet exports
+    routinely have hundreds of formatted-but-empty rows past the real
+    data, the same issue the CSV extractor already filters out."""
+    text_rows: list[list[str]] = []
+    cell_rows: list[list[Any]] = []
+
+    for row in worksheet.iter_rows(values_only=False):
+        texts = [_clean_text(str(cell.value)) if cell.value is not None else "" for cell in row]
+        if any(texts):
+            text_rows.append(texts)
+            cell_rows.append(list(row))
+
+    max_len = max((len(row) for row in text_rows), default=0)
+    for row in text_rows:
+        row.extend([""] * (max_len - len(row)))
+
+    return text_rows, cell_rows
+
+
+def _cell_is_bold_xlsx(cell_rows: list[list[Any]], row_idx: int, col_idx: int) -> bool:
+    if row_idx >= len(cell_rows) or col_idx >= len(cell_rows[row_idx]):
+        return False
+    font = cell_rows[row_idx][col_idx].font
+    return bool(font and font.bold)
+
+
+def extract_xlsx_blocks(file_path: str | Path) -> list[dict[str, Any]]:
+    """One table block per worksheet. data_only=True reads each formula
+    cell's last-computed value rather than the formula text itself."""
+    from openpyxl import load_workbook
+
+    path = Path(file_path)
+    filename = path.name
+    workbook = load_workbook(path, data_only=True)
+
+    blocks: list[dict[str, Any]] = []
+    table_index = 0
+    block_index = 0
+
+    for sheet_name in workbook.sheetnames:
+        worksheet = workbook[sheet_name]
+        grid, cell_rows = _read_xlsx_sheet_grid(worksheet)
+        if not grid:
+            continue
+
+        is_bold_fn = lambda r, c, cr=cell_rows: _cell_is_bold_xlsx(cr, r, c)
+        block = _build_table_block(grid, is_bold_fn, table_index, sheet_name)
+        block["metadata"] = {
+            "filename": filename, "block_index": block_index, "section_title": sheet_name,
+            "table_index": table_index, "num_rows": len(grid), "num_columns": len(grid[0]) if grid else 0,
+        }
+        blocks.append(block)
+        table_index += 1
+        block_index += 1
+
+    return blocks
+
+
+# ---------------------------------------------------------------------------
 # Markdown -- headings (#), list items (-/*), pipe tables (| a | b |)
 # ---------------------------------------------------------------------------
 
@@ -792,11 +933,25 @@ def _raw_word_count(file_path: str | Path) -> Optional[int]:
     if suffix == ".docx":
         from docx import Document
         from docx.oxml.ns import qn
+        from docx.text.paragraph import Paragraph
 
         doc = Document(path)
-        # Every <w:t> node under the body, however deeply nested -- not
-        # just the top-level <w:p>/<w:tbl> children the block loop walks.
-        return sum(len((t.text or "").split()) for t in doc.element.body.iter(qn("w:t")))
+        # Concatenate each paragraph's/cell's runs before splitting into
+        # words -- matching how extract_docx_blocks() counts -- rather
+        # than splitting each individual <w:t> run separately and summing.
+        # Word frequently splits a single word across adjacent runs (e.g.
+        # a formatting change mid-word: "C" + "ompact"), which the
+        # per-run approach previously double-counted as two words,
+        # inflating this baseline and producing false "content loss"
+        # warnings for documents nothing was actually lost from.
+        count = sum(len(p.text.split()) for p in doc.paragraphs)
+        count += sum(len(cell.text.split()) for t in doc.tables for row in t.rows for cell in row.cells)
+        for p_element in doc.element.body.iterchildren():
+            if p_element.tag != qn("w:p"):
+                continue
+            for tb_element in _iter_textbox_paragraph_elements(p_element):
+                count += len(Paragraph(tb_element, doc).text.split())
+        return count
 
     if suffix == ".pptx":
         from pptx import Presentation
@@ -829,7 +984,30 @@ def _raw_word_count(file_path: str | Path) -> Optional[int]:
         return sum(len((page.extract_text() or "").split()) for page in reader.pages)
 
     if suffix == ".csv":
-        return len(path.read_text(encoding="utf-8-sig").split())
+        # Parses through csv.reader rather than splitting the raw file
+        # text on whitespace -- a naive whitespace split doesn't
+        # understand comma-delimiting, so a run of empty cells with no
+        # space between their separating commas (e.g. a blank row:
+        # ",,,,,,,,,,,,,,,,,,,") reads as a single non-empty "word" that
+        # doesn't exist in any real cell, inflating this baseline.
+        with open(path, "r", encoding="utf-8-sig", newline="") as f:
+            reader = csv.reader(f)
+            return sum(len(cell.split()) for row in reader for cell in row)
+
+    if suffix == ".xlsx":
+        from openpyxl import load_workbook
+
+        # read_only=True: this only needs cell values, not font/style info
+        # (that's only needed by extract_xlsx_blocks' bold detection), so
+        # the lighter-weight read-only mode is fine and faster here.
+        workbook = load_workbook(path, data_only=True, read_only=True)
+        count = 0
+        for sheet_name in workbook.sheetnames:
+            for row in workbook[sheet_name].iter_rows(values_only=True):
+                for value in row:
+                    if value is not None:
+                        count += len(str(value).split())
+        return count
 
     if suffix in (".md", ".markdown", ".txt"):
         return len(path.read_text(encoding="utf-8").split())
@@ -884,6 +1062,7 @@ _EXTRACTORS: dict[str, Callable[[str | Path], list[dict[str, Any]]]] = {
     ".pptx": extract_pptx_blocks,
     ".pdf": extract_pdf_blocks,
     ".csv": extract_csv_blocks,
+    ".xlsx": extract_xlsx_blocks,
     ".md": extract_markdown_blocks,
     ".markdown": extract_markdown_blocks,
     ".txt": extract_txt_blocks,

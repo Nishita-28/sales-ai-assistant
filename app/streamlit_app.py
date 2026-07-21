@@ -10,6 +10,13 @@ import sys
 from pathlib import Path
 
 import streamlit as st
+from dotenv import load_dotenv
+
+# Loaded explicitly here rather than relying on it happening as a side
+# effect of importing app.retriever below -- ADMIN_PASSWORD is read from
+# the environment a few lines down, and that shouldn't depend on another
+# module's import order to work.
+load_dotenv()
 
 # `streamlit run app/streamlit_app.py` sets sys.path[0] to this file's own
 # directory (app/), not the project root, regardless of the cwd the command
@@ -27,13 +34,14 @@ from app.retriever import RetrieverError
 APPROVED_DOCS_DIR = Path("data/approved_docs")
 
 def get_admin_password() -> str:
-    """Reads ADMIN_PASSWORD from st.secrets, then env var, then falls back
-    to "admin". TEMPORARY: that fallback is a local-testing placeholder --
-    replace it with a real secret before this touches a shared environment."""
+    """Reads ADMIN_PASSWORD from st.secrets, then the environment (.env).
+    No hardcoded fallback -- an empty return correctly triggers the "not
+    set" error shown below instead of silently accepting a guessable
+    default password."""
     try:
         return st.secrets["ADMIN_PASSWORD"]
     except (KeyError, FileNotFoundError, st.errors.StreamlitSecretNotFoundError):
-        return os.environ.get("ADMIN_PASSWORD", "admin")
+        return os.environ.get("ADMIN_PASSWORD", "")
 
 
 ADMIN_PASSWORD = get_admin_password()
@@ -56,10 +64,10 @@ if "admin_authenticated" not in st.session_state:
     st.session_state.admin_authenticated = False
 
 SAMPLE_QUESTIONS = [
-    "What gases are we targeting?",
-    "Can we detect hydrogen?",
-    "Do we support RS485?",
-    "Can we say this is ATEX certified?",
+    "Can this be used to monitor hydrogen buildup in a lead-acid battery room?",
+    "Is the FIXaHY sensor PESO approved for hazardous areas?",
+    "Can I integrate this with our existing SCADA system over RS485 or 4-20mA?",
+    "Can AURIGA be deployed in a hazardous area?",
 ]
 
 RISK_COLORS = {
