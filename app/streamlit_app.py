@@ -20,9 +20,13 @@ load_dotenv()
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.admin_page import render_admin_page
+from app.claim_checker import warm_up as warm_up_claim_checker
+from app.feedback_store import record_feedback
 from app.rag_pipeline import answer_question
 from app.response_generator import ResponseGeneratorError
+from app.response_generator import warm_up as warm_up_response_generator
 from app.retriever import RetrieverError
+from app.retriever import warm_up as warm_up_retriever
 
 APPROVED_DOCS_DIR = Path("data/approved_docs")
 
@@ -44,6 +48,23 @@ st.set_page_config(
     page_title="Internal AI Sales Assistant",
     layout="centered",
 )
+
+# ---------------------------------------------------------------------------
+# Backend warm-up -- initializes API clients, the vector store connection,
+# and cached files once per server process, so the first real question
+# doesn't pay for setup that could happen at startup instead.
+# ---------------------------------------------------------------------------
+@st.cache_resource
+def _warm_up_backend() -> None:
+    try:
+        warm_up_retriever()
+        warm_up_response_generator()
+        warm_up_claim_checker()
+    except Exception:
+        pass  # the first real question will retry and surface any real error
+
+
+_warm_up_backend()
 
 # ---------------------------------------------------------------------------
 # Session state
@@ -138,6 +159,17 @@ with st.sidebar:
 
 
 # ---------------------------------------------------------------------------
+# Feedback: Correct/Wrong/Unsafe buttons on each answer
+# ---------------------------------------------------------------------------
+@st.dialog("What was wrong with this answer?")
+def _report_wrong_dialog(question: str, answer: str) -> None:
+    note = st.text_area("Notes (optional)", placeholder="What was incorrect?")
+    if st.button("Submit", type="primary"):
+        record_feedback(question, answer, "wrong", note)
+        st.rerun()
+
+
+# ---------------------------------------------------------------------------
 # Assistant page
 # ---------------------------------------------------------------------------
 def render_assistant_page() -> None:
@@ -153,7 +185,7 @@ def render_assistant_page() -> None:
                 st.session_state.pending_question = q
 
     # Render past Q&A as a chat thread
-    for turn in st.session_state.history:
+    for idx, turn in enumerate(st.session_state.history):
         with st.chat_message("user"):
             st.write(turn["question"])
         with st.chat_message("assistant"):
@@ -171,19 +203,24 @@ def render_assistant_page() -> None:
                 for name, section in turn["sources"]:
                     st.markdown(f"- `{name}` — {section}")
 
-            copy_button(turn["answer"], "Copy answer", key=f"ans-{turn['question'][:10]}")
+            copy_button(turn["answer"], "Copy answer", key=f"ans-{idx}")
 
             if turn["customer_wording"]:
                 with st.expander("Customer-facing wording"):
                     st.write(turn["customer_wording"])
-                    copy_button(turn["customer_wording"], "Copy customer wording", key=f"cust-{turn['question'][:10]}")
+                    copy_button(turn["customer_wording"], "Copy customer wording", key=f"cust-{idx}")
             else:
                 st.caption("Customer-facing wording blocked — escalate for review.")
 
             fcol1, fcol2, fcol3 = st.columns(3)
-            fcol1.button("Correct", key=f"ok-{turn['question'][:10]}")
-            fcol2.button("Wrong", key=f"bad-{turn['question'][:10]}")
-            fcol3.button("Unsafe", key=f"unsafe-{turn['question'][:10]}")
+            if fcol1.button("Correct", key=f"ok-{idx}"):
+                record_feedback(turn["question"], turn["answer"], "correct")
+                st.toast("Thanks for the feedback!")
+            if fcol2.button("Wrong", key=f"bad-{idx}"):
+                _report_wrong_dialog(turn["question"], turn["answer"])
+            if fcol3.button("Unsafe", key=f"unsafe-{idx}"):
+                record_feedback(turn["question"], turn["answer"], "unsafe")
+                st.toast("Thanks for flagging this — reported for review.")
 
     # Question input
     question = st.chat_input("Ask a sales or application question")

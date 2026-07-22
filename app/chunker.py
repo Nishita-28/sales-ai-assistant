@@ -24,6 +24,7 @@ class Chunk:
 
     text: str
     document_name: str
+    product_name: str
     chunk_index: int
     total_chunks: int
     page_number: Optional[int] = None
@@ -35,9 +36,57 @@ class Chunk:
 
 
 def _document_title(document_name: str) -> str:
-    """Strips the file extension for use as a chunk-text prefix, so a
-    query naming the product can still match."""
+    """Strips the file extension -- the fallback product identity for a
+    document with no headings at all (e.g. a table-only spreadsheet)."""
     return os.path.splitext(document_name)[0]
+
+
+def _document_headings(document: dict[str, Any]) -> list[str]:
+    return [
+        (b.get("text") or "").strip()
+        for b in document.get("blocks", [])
+        if b.get("type") == "heading" and (b.get("text") or "").strip()
+    ]
+
+
+def assign_product_name(document: dict[str, Any], other_documents: tuple[dict[str, Any], ...] = ()) -> str:
+    """Uses the document's own first heading as its product identity,
+    since catalogues put the product name first. When another document
+    shares the same heading at the same position -- e.g. two model
+    variants under one family name -- walks forward to the first heading
+    that actually differs between them, so the two don't collide onto the
+    same identity. Falls back to the filename when a document has no
+    headings at all."""
+    own_headings = _document_headings(document)
+    other_heading_seqs = [_document_headings(d) for d in other_documents]
+
+    for i, heading in enumerate(own_headings):
+        if not any(i < len(seq) and seq[i] == heading for seq in other_heading_seqs):
+            return heading
+
+    if own_headings:
+        return own_headings[-1]
+    return _document_title(document.get("filename", "unknown"))
+
+
+def assign_product_name_avoiding(document: dict[str, Any], taken_names: set[str]) -> str:
+    """Simpler variant for adding one new document to an already-indexed
+    corpus, where only the already-assigned product names are available
+    (not the other documents' full heading sequences)."""
+    for heading in _document_headings(document):
+        if heading not in taken_names:
+            return heading
+    return _document_title(document.get("filename", "unknown"))
+
+
+def _assign_product_names(documents: list[dict[str, Any]]) -> dict[str, str]:
+    """Collision-aware product-name assignment across a batch of documents
+    being (re)indexed together."""
+    names: dict[str, str] = {}
+    for i, document in enumerate(documents):
+        others = tuple(documents[:i] + documents[i + 1 :])
+        names[document.get("filename", "unknown")] = assign_product_name(document, others)
+    return names
 
 
 def _table_block_to_text(block: dict[str, Any]) -> str:
@@ -224,16 +273,21 @@ def _pack_blocks_into_chunks(
 
 def chunk_document(
     document: dict[str, Any],
+    product_name: Optional[str] = None,
     chunk_size: int = DEFAULT_CHUNK_SIZE,
     overlap: int = DEFAULT_OVERLAP,
 ) -> list[Chunk]:
     """Chunks one loaded document into Chunk objects, respecting section
-    and table boundaries."""
+    and table boundaries. product_name is used as the chunk-text prefix
+    and stored per chunk; defaults to assign_product_name(document) when
+    not given (e.g. when chunking a single document in isolation)."""
     boundary_units = _split_into_boundary_units(document)
     if not boundary_units:
         return []
 
     document_name = document.get("filename", "unknown")
+    if product_name is None:
+        product_name = assign_product_name(document)
 
     raw_chunks: list[list[tuple[str, dict[str, Any]]]] = []
     for unit in boundary_units:
@@ -258,17 +312,16 @@ def chunk_document(
         else:
             merged_chunks.append(carry)
 
-    document_title = _document_title(document_name)
-
     total_chunks = len(merged_chunks)
     chunks: list[Chunk] = []
     for index, unit_group in enumerate(merged_chunks):
-        text = f"{document_title}: " + " ".join(word for word, _ in unit_group)
+        text = f"{product_name}: " + " ".join(word for word, _ in unit_group)
         first_word_meta = unit_group[0][1]
         chunks.append(
             Chunk(
                 text=text,
                 document_name=document_name,
+                product_name=product_name,
                 chunk_index=index,
                 total_chunks=total_chunks,
                 page_number=first_word_meta.get("page_number"),
@@ -286,13 +339,17 @@ def chunk_documents(
     overlap: int = DEFAULT_OVERLAP,
 ) -> list[Chunk]:
     """Chunks a single loader output dict, or a list of them, into one flat
-    list of Chunk objects."""
+    list of Chunk objects. Product names are assigned collision-aware
+    across the whole batch (see assign_product_name)."""
     if isinstance(documents, dict):
         documents = [documents]
 
+    product_names = _assign_product_names(documents)
+
     all_chunks: list[Chunk] = []
     for document in documents:
-        all_chunks.extend(chunk_document(document, chunk_size=chunk_size, overlap=overlap))
+        name = product_names[document.get("filename", "unknown")]
+        all_chunks.extend(chunk_document(document, name, chunk_size=chunk_size, overlap=overlap))
     return all_chunks
 
 

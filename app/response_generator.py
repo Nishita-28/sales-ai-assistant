@@ -214,6 +214,17 @@ def _get_azure_openai_chat_client():
     return _chat_client
 
 
+def warm_up() -> None:
+    """Eagerly loads the system prompt and makes a throwaway chat completion
+    call, so the network connection is already warm before the first
+    question -- constructing the client alone doesn't touch the slow part
+    (the TLS handshake on the first real request). max_tokens=1 keeps this
+    as cheap as a chat completion call can be."""
+    _load_system_prompt()
+    if LLM_PROVIDER in ("openai", "azure_openai"):
+        _call_llm("Hi", "Hi", max_tokens=1)
+
+
 def _call_offline_mock(user_message: str) -> str:
     """A fixed, well-formed reply so the pipeline is testable without a
     real API key."""
@@ -228,8 +239,10 @@ def _call_offline_mock(user_message: str) -> str:
     )
 
 
-def _call_llm(system_prompt: str, user_message: str) -> str:
-    """Single dispatch point for LLM_PROVIDER."""
+def _call_llm(system_prompt: str, user_message: str, max_tokens: Optional[int] = None) -> str:
+    """Single dispatch point for LLM_PROVIDER. max_tokens is only for
+    callers (like warm_up) that want to cap response length -- real answer
+    generation leaves it unset."""
     if LLM_PROVIDER == "offline_mock":
         return _call_offline_mock(user_message)
 
@@ -237,17 +250,20 @@ def _call_llm(system_prompt: str, user_message: str) -> str:
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_message},
     ]
+    extra = {"max_tokens": max_tokens} if max_tokens is not None else {}
 
     if LLM_PROVIDER == "azure_openai":
         client = _get_azure_openai_chat_client()
         response = client.chat.completions.create(
-            model=AZURE_OPENAI_DEPLOYMENT, messages=messages, temperature=0.2
+            model=AZURE_OPENAI_DEPLOYMENT, messages=messages, temperature=0.2, **extra
         )
         return response.choices[0].message.content or ""
 
     if LLM_PROVIDER == "openai":
         client = _get_openai_chat_client()
-        response = client.chat.completions.create(model=OPENAI_MODEL, messages=messages, temperature=0.2)
+        response = client.chat.completions.create(
+            model=OPENAI_MODEL, messages=messages, temperature=0.2, **extra
+        )
         return response.choices[0].message.content or ""
 
     raise ResponseGeneratorError(

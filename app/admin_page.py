@@ -12,13 +12,22 @@ import pandas as pd
 import streamlit as st
 
 from app.claims_store import load_claims, save_claims
+from app.feedback_store import (
+    count_correct,
+    delete_feedback,
+    most_reported_question,
+    recent_reports,
+    resolve_feedback,
+)
 from app.restricted_policy import KNOWN_CATEGORIES, PolicyEntry, load_entries, save_entries
 from app.retriever import (
     RetrieverError,
     SUPPORTED_DOC_EXTENSIONS,
+    add_document_to_index,
     build_index,
     index_size,
     load_and_chunk_approved_docs,
+    remove_document_from_index,
 )
 
 APPROVED_DOCS_DIR = Path("data/approved_docs")
@@ -92,8 +101,13 @@ def _confirm_remove_dialog(doc_path: Path) -> None:
     if col1.button("Remove", type="primary", use_container_width=True):
         REMOVED_DOCS_DIR.mkdir(parents=True, exist_ok=True)
         shutil.move(str(doc_path), str(REMOVED_DOCS_DIR / doc_path.name))
-        st.session_state.docs_changed_since_rebuild = True
-        st.rerun()
+        try:
+            remove_document_from_index(doc_path.name)
+        except RetrieverError as e:
+            st.session_state.docs_changed_since_rebuild = True
+            st.error(f"Moved the file, but removing it from the index failed: {e}. Use Rebuild Index to retry.")
+        else:
+            st.rerun()
     if col2.button("Cancel", use_container_width=True):
         st.rerun()
 
@@ -115,9 +129,15 @@ def _render_documents_tab() -> None:
         elif st.button("Add to knowledge base", type="primary"):
             APPROVED_DOCS_DIR.mkdir(parents=True, exist_ok=True)
             target_path.write_bytes(uploaded_file.getbuffer())
-            st.session_state.docs_changed_since_rebuild = True
-            st.success(f"Added {uploaded_file.name}. Rebuild the index above to include it.")
-            st.rerun()
+            with st.spinner("Indexing new document..."):
+                try:
+                    count = add_document_to_index(target_path)
+                except RetrieverError as e:
+                    st.session_state.docs_changed_since_rebuild = True
+                    st.error(f"Added the file, but indexing failed: {e}. Use Rebuild Index to retry.")
+                else:
+                    st.success(f"Added and indexed {uploaded_file.name} ({count} chunks).")
+                    st.rerun()
 
     st.subheader("Current documents")
     doc_paths = _approved_doc_paths()
@@ -222,6 +242,51 @@ def _render_restricted_claims_tab() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Feedback tab -- what the Correct/Wrong/Unsafe buttons in the Assistant
+# page actually record.
+# ---------------------------------------------------------------------------
+@st.dialog("Delete this report?")
+def _confirm_delete_report_dialog(report_id: int) -> None:
+    st.write("This permanently removes the report from the database. This cannot be undone.")
+    col1, col2 = st.columns(2)
+    if col1.button("Delete", type="primary", use_container_width=True):
+        delete_feedback(report_id)
+        st.rerun()
+    if col2.button("Cancel", use_container_width=True):
+        st.rerun()
+
+
+def _render_feedback_tab() -> None:
+    col1, col2 = st.columns(2)
+    col1.metric("Correct answers", count_correct())
+
+    reported = most_reported_question()
+    col2.metric("Most reported question -- report count", reported[1] if reported else 0)
+    if reported:
+        st.caption(f'Most reported question: "{reported[0]}"')
+
+    st.subheader("Active Wrong / Unsafe reports")
+    reports = recent_reports()
+    if not reports:
+        st.caption("No active reports.")
+        return
+
+    for report in reports:
+        with st.container(border=True):
+            st.markdown(f"**{report['verdict'].capitalize()}** · {report['created_at']}")
+            st.write(f"Q: {report['question']}")
+            st.write(f"A: {report['answer']}")
+            if report["note"]:
+                st.caption(f"Note: {report['note']}")
+            col1, col2 = st.columns(2)
+            if col1.button("Resolve", key=f"resolve-{report['id']}", use_container_width=True):
+                resolve_feedback(report["id"])
+                st.rerun()
+            if col2.button("Delete", key=f"delete-{report['id']}", use_container_width=True):
+                _confirm_delete_report_dialog(report["id"])
+
+
+# ---------------------------------------------------------------------------
 # Page entry point
 # ---------------------------------------------------------------------------
 def render_admin_page() -> None:
@@ -234,8 +299,8 @@ def render_admin_page() -> None:
 
     _render_rebuild_status()
 
-    documents_tab, approved_tab, restricted_tab = st.tabs(
-        ["Documents", "Approved Claims", "Restricted Claims"]
+    documents_tab, approved_tab, restricted_tab, feedback_tab = st.tabs(
+        ["Documents", "Approved Claims", "Restricted Claims", "Feedback"]
     )
 
     with documents_tab:
@@ -246,3 +311,6 @@ def render_admin_page() -> None:
 
     with restricted_tab:
         _render_restricted_claims_tab()
+
+    with feedback_tab:
+        _render_feedback_tab()

@@ -35,12 +35,21 @@ def _load_policy() -> tuple[dict[str, list[str]], set[str]]:
     return categories, always_unsupported
 
 
+def warm_up() -> None:
+    """Eagerly loads and caches the restricted-claims policy."""
+    _load_policy()
+
+
 def _normalize(text: str) -> str:
     return re.sub(r"\s+", " ", text.strip().lower())
 
 
 def _contains_term(text: str, term: str) -> bool:
-    pattern = r"\b" + re.escape(term) + r"(?:es|s)?\b"
+    # The lookbehind stops "non-hazardous"/"non hazardous" from counting as
+    # a match for "hazardous" -- a plain \b fires right after the hyphen,
+    # so without this, a restriction ("non-hazardous area only") would
+    # silently read as support for the opposite, unqualified claim.
+    pattern = r"(?<!non-)(?<!non )\b" + re.escape(term) + r"(?:es|s)?\b"
     return re.search(pattern, text) is not None
 
 
