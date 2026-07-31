@@ -120,16 +120,17 @@
     calibration -- not as a target gas the product detects.)
 
 - category: Accuracy
-  keywords: []
-  always_unsupported: false
+  keywords: ["wireless", "lora", "lo-ra", "wi-fi", "wifi", "nb-iot", "nbiot", "bluetooth"]
+  always_unsupported: true
   note: >-
-    KNOWN GAP, not yet enforced: wireless connectivity (LoRa, Wi-Fi,
-    NB-IoT, Bluetooth) as a current product feature is not documented for
-    any product in the approved corpus -- current products document wired
-    interfaces only (RS485, 4-20mA, CAN). This entry has no keywords yet
-    (carried over from before this policy was code-enforced), so it is
-    currently documentation only. Add keywords such as "wireless", "lora",
-    "wi-fi", "nb-iot", "bluetooth" here to start enforcing it.
+    Wireless connectivity (LoRa, Wi-Fi, NB-IoT, Bluetooth) is not a
+    documented feature of any current MNST product in the approved corpus
+    -- current products document wired interfaces only (RS485, 4-20mA,
+    CAN). This claim is always unsupported regardless of source text
+    wording, because the only place "wireless" style terms may appear in
+    the corpus is a competitor-comparison document describing OTHER
+    companies' products, not MNST's; that context must never be read as
+    supporting a wireless claim about an MNST product.
 
 - category: Safety
   keywords: ["safe to use", "completely safe", "guaranteed safe", "fail-safe", "failsafe", "no risk of"]

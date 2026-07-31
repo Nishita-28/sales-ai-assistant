@@ -1,5 +1,5 @@
 """Document extraction and parsing logic for all supported formats
-(docx, pptx, pdf, csv, md, txt)."""
+(docx, pptx, pdf, csv, md, txt, and OCR'd images)."""
 #python -m app.chunker "data/approved_docs/MNST_NC2. Catalogue_PORTaHY H2 LD (Leak Detector Series).docx"
 #python -m app.document_loader "data/approved_docs/MNST_NC11. Catalogue_Auriga (Leak Detector Series).docx"
 
@@ -26,6 +26,55 @@ def _clean_text(text: str) -> str:
     text = re.sub(r"\s*\n\s*", " ", text)
     text = re.sub(r"\s+", " ", text)
     return text.strip()
+
+
+# ---------------------------------------------------------------------------
+# OCR -- text baked into images (scanned PDF pages, screenshots/photos
+# embedded in a document, or a standalone image file). Kept as one shared
+# helper so every extractor that needs it (PDF page fallback, embedded
+# images in DOCX/PPTX, standalone image files) goes through the same
+# engine and the same cached instance -- initializing RapidOCR loads its
+# models, which is too slow to repeat per call.
+# ---------------------------------------------------------------------------
+
+# Below this many characters, a PDF page's native text layer is treated as
+# absent (scanned page) rather than just a short page of real text.
+OCR_MIN_NATIVE_TEXT_CHARS = 20
+
+_ocr_engine = None
+
+
+def _get_ocr_engine():
+    global _ocr_engine
+    if _ocr_engine is None:
+        from rapidocr_onnxruntime import RapidOCR
+
+        _ocr_engine = RapidOCR()
+    return _ocr_engine
+
+
+def _run_ocr(image_bytes: bytes) -> str:
+    """Runs OCR on raw image bytes and returns the recognized text, lines
+    joined with newlines in reading order. Returns "" if nothing is
+    recognized (e.g. a decorative image with no text), or if the bytes
+    aren't a raster format Pillow can decode at all (embedded vector
+    graphics like SVG/WMF/EMF are common in real DOCX/PPTX files and
+    aren't something OCR applies to) -- either case is a normal, expected
+    outcome for some embedded images, not an error."""
+    import io
+
+    import numpy as np
+    from PIL import Image, UnidentifiedImageError
+
+    try:
+        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    except (UnidentifiedImageError, OSError):
+        return ""
+
+    result, _ = _get_ocr_engine()(np.array(image))
+    if not result:
+        return ""
+    return "\n".join(line[1] for line in result)
 
 
 def _no_bold(_row: int, _col: int) -> bool:
@@ -504,6 +553,28 @@ def extract_docx_blocks(file_path: str | Path) -> list[dict[str, Any]]:
             table_index += 1
             block_index += 1
 
+    # Embedded pictures (screenshots, scanned certificates, nameplate
+    # photos) aren't part of the paragraph/table walk above at all -- python-
+    # docx exposes them only via the part relationships, not as inline text.
+    # This is a flat pass over every embedded image in the file, not
+    # positioned relative to the section it visually appears under -- good
+    # enough to make the text searchable/retrievable, not a layout-accurate
+    # placement.
+    for rel in document.part.rels.values():
+        if "image" not in rel.reltype:
+            continue
+        text = _run_ocr(rel.target_part.blob)
+        for para in re.split(r"\n\s*\n", text):
+            cleaned = _clean_text(para)
+            if not cleaned:
+                continue
+            blocks.append({
+                "type": _paragraph_type_plaintext(cleaned),
+                "text": cleaned,
+                "metadata": {"filename": filename, "block_index": block_index, "section_title": None, "extraction_method": "ocr"},
+            })
+            block_index += 1
+
     return blocks
 
 
@@ -575,6 +646,24 @@ def extract_pptx_blocks(file_path: str | Path) -> list[dict[str, Any]]:
                     block_index += 1
                     continue
 
+                if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
+                    text = _run_ocr(shape.image.blob)
+                    for para in re.split(r"\n\s*\n", text):
+                        cleaned = _clean_text(para)
+                        if not cleaned:
+                            continue
+                        blocks.append({
+                            "type": _paragraph_type_plaintext(cleaned),
+                            "text": cleaned,
+                            "metadata": {
+                                "filename": filename, "block_index": block_index,
+                                "section_title": current_section or None, "slide_number": slide_num,
+                                "extraction_method": "ocr",
+                            },
+                        })
+                        block_index += 1
+                    continue
+
                 if not shape.has_text_frame:
                     continue
 
@@ -623,6 +712,13 @@ def _paragraph_type_plaintext(text: str) -> str:
     return "paragraph"
 
 
+def _ocr_pdf_page(fitz_doc, page_index: int) -> str:
+    """Rasterizes one page (0-indexed) and OCRs it -- the fallback for a
+    page with no usable native text layer (a scanned page)."""
+    pixmap = fitz_doc[page_index].get_pixmap(dpi=200)
+    return _run_ocr(pixmap.tobytes("png"))
+
+
 def extract_pdf_blocks(file_path: str | Path) -> list[dict[str, Any]]:
     from pypdf import PdfReader
 
@@ -633,9 +729,21 @@ def extract_pdf_blocks(file_path: str | Path) -> list[dict[str, Any]]:
     blocks: list[dict[str, Any]] = []
     current_section = ""
     block_index = 0
+    fitz_doc = None  # opened lazily, only if some page actually needs OCR
 
     for page_num, page in enumerate(reader.pages, start=1):
         raw_text = page.extract_text() or ""
+        used_ocr = False
+        if len(raw_text.strip()) < OCR_MIN_NATIVE_TEXT_CHARS:
+            import fitz
+
+            if fitz_doc is None:
+                fitz_doc = fitz.open(path)
+            ocr_text = _ocr_pdf_page(fitz_doc, page_num - 1)
+            if ocr_text.strip():
+                raw_text = ocr_text
+                used_ocr = True
+
         for para in re.split(r"\n\s*\n", raw_text):
             text = _clean_text(para)
             if not text:
@@ -643,12 +751,41 @@ def extract_pdf_blocks(file_path: str | Path) -> list[dict[str, Any]]:
             block_type = _paragraph_type_plaintext(text)
             if block_type == "heading":
                 current_section = text
-            blocks.append({
-                "type": block_type,
-                "text": text,
-                "metadata": {"filename": filename, "block_index": block_index, "section_title": current_section or None, "page_number": page_num},
-            })
+            metadata = {"filename": filename, "block_index": block_index, "section_title": current_section or None, "page_number": page_num}
+            if used_ocr:
+                metadata["extraction_method"] = "ocr"
+            blocks.append({"type": block_type, "text": text, "metadata": metadata})
             block_index += 1
+
+    if fitz_doc is not None:
+        fitz_doc.close()
+
+    return blocks
+
+
+# ---------------------------------------------------------------------------
+# Standalone image files -- the whole file is one OCR pass, since there's
+# no independent structure (headings, tables) to detect the way there is
+# in a text document.
+# ---------------------------------------------------------------------------
+
+def extract_image_blocks(file_path: str | Path) -> list[dict[str, Any]]:
+    path = Path(file_path)
+    filename = path.name
+
+    text = _run_ocr(path.read_bytes())
+    blocks: list[dict[str, Any]] = []
+    block_index = 0
+    for para in re.split(r"\n\s*\n", text):
+        cleaned = _clean_text(para)
+        if not cleaned:
+            continue
+        blocks.append({
+            "type": _paragraph_type_plaintext(cleaned),
+            "text": cleaned,
+            "metadata": {"filename": filename, "block_index": block_index, "section_title": None, "extraction_method": "ocr"},
+        })
+        block_index += 1
 
     return blocks
 
@@ -965,6 +1102,11 @@ _EXTRACTORS: dict[str, Callable[[str | Path], list[dict[str, Any]]]] = {
     ".md": extract_markdown_blocks,
     ".markdown": extract_markdown_blocks,
     ".txt": extract_txt_blocks,
+    ".png": extract_image_blocks,
+    ".jpg": extract_image_blocks,
+    ".jpeg": extract_image_blocks,
+    ".bmp": extract_image_blocks,
+    ".tiff": extract_image_blocks,
 }
 
 

@@ -64,7 +64,7 @@ class GeneratedAnswer:
     category, and optional customer-facing draft."""
 
     answer: str
-    sources: list[tuple[str, str]]
+    sources: list[tuple[str, str, str]]
     confidence: str  # "High" or "Low"
     risk: str  # risk category, or "None"
     customer_wording: Optional[str]
@@ -129,13 +129,17 @@ def _format_source(metadata: dict[str, Any]) -> tuple[str, str]:
     return document_name, label
 
 
-def _dedupe_sources(matches: list[dict[str, Any]]) -> list[tuple[str, str]]:
-    """A (document, section) pair can appear on more than one retrieved
-    chunk; list it once, in first-seen order."""
-    seen: set[tuple[str, str]] = set()
-    sources: list[tuple[str, str]] = []
+def _dedupe_sources(matches: list[dict[str, Any]]) -> list[tuple[str, str, str]]:
+    """A (document, section, extracted text) triple can appear on more than
+    one retrieved chunk; list it once, in first-seen order. The extracted
+    text is the exact chunk wording retrieved from the document -- shown in
+    the UI so a rep can see what grounded the answer, not just its source."""
+    seen: set[tuple[str, str, str]] = set()
+    sources: list[tuple[str, str, str]] = []
     for match in matches:
-        source = _format_source(match.get("metadata") or {})
+        document_name, label = _format_source(match.get("metadata") or {})
+        text = (match.get("text") or "").strip()
+        source = (document_name, label, text)
         if source in seen:
             continue
         seen.add(source)
@@ -385,8 +389,10 @@ if __name__ == "__main__":
     print(f"Risk: {result.risk}")
     print(f"Answer: {result.answer}")
     print("Sources:")
-    for name, label in result.sources:
+    for name, label, text in result.sources:
         print(f"  - {name} ({label})")
+        if text:
+            print(f"      \"{text}\"")
     if result.customer_wording:
         print(f"Customer-facing wording: {result.customer_wording}")
     else:

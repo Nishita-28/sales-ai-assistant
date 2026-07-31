@@ -61,11 +61,73 @@ def delete_feedback(feedback_id: int) -> None:
         conn.execute("DELETE FROM feedback WHERE id = ?", (feedback_id,))
 
 
-def count_correct() -> int:
-    """Total number of answers marked correct."""
+def list_all_feedback(limit: int = 50) -> list[sqlite3.Row]:
+    """Every feedback event (any verdict, resolved or not), newest first --
+    for the admin data-management view. Unlike recent_reports(), this isn't
+    limited to active wrong/unsafe reports, since correct-marked events can
+    just as easily be test data that needs clearing out."""
     with closing(_connect()) as conn:
-        row = conn.execute("SELECT COUNT(*) FROM feedback WHERE verdict = 'correct'").fetchone()
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT id, created_at, question, verdict FROM feedback ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return rows
+
+
+def count_feedback(before: Optional[str] = None) -> int:
+    """Total feedback rows, or only those strictly before the given
+    YYYY-MM-DD cutoff if given. Used to preview a bulk-clear's impact
+    before committing to it."""
+    with closing(_connect()) as conn:
+        if before:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM feedback WHERE date(created_at) < ?", (before,)
+            ).fetchone()
+        else:
+            row = conn.execute("SELECT COUNT(*) FROM feedback").fetchone()
     return row[0] if row else 0
+
+
+def clear_feedback_before(cutoff_date: str) -> int:
+    """Permanently deletes every feedback event recorded before the given
+    YYYY-MM-DD date -- e.g. to drop stale test data from the accuracy
+    chart without losing real, recent feedback. Returns the number of rows
+    removed."""
+    with closing(_connect()) as conn, conn:
+        cursor = conn.execute("DELETE FROM feedback WHERE date(created_at) < ?", (cutoff_date,))
+        return cursor.rowcount
+
+
+def clear_all_feedback() -> int:
+    """Permanently deletes every feedback event, resetting the accuracy
+    chart to empty. Returns the number of rows removed."""
+    with closing(_connect()) as conn, conn:
+        cursor = conn.execute("DELETE FROM feedback")
+        return cursor.rowcount
+
+
+def daily_feedback_counts() -> list[sqlite3.Row]:
+    """One row per calendar day that has at least one feedback event, with
+    correct/wrong/unsafe counts for that day, oldest first. Powers the
+    Feedback tab's accuracy-over-time chart. Days with zero events are
+    simply absent rather than zero-filled, so an inactive stretch doesn't
+    read as a false 0% accuracy dip."""
+    with closing(_connect()) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT
+                date(created_at) AS day,
+                SUM(CASE WHEN verdict = 'correct' THEN 1 ELSE 0 END) AS correct,
+                SUM(CASE WHEN verdict = 'wrong' THEN 1 ELSE 0 END) AS wrong,
+                SUM(CASE WHEN verdict = 'unsafe' THEN 1 ELSE 0 END) AS unsafe
+            FROM feedback
+            GROUP BY day
+            ORDER BY day ASC
+            """
+        ).fetchall()
+    return rows
 
 
 def most_reported_question() -> Optional[tuple[str, int]]:

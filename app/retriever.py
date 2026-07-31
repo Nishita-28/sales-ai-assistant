@@ -373,6 +373,23 @@ def _distinctive_product_tokens(product_names: list[str]) -> dict[str, set[str]]
     }
 
 
+def _is_single_product_document(document_name: str) -> bool:
+    """Competitor-comparison and other reference documents describe many
+    products at once under one umbrella heading (e.g. "Hydrogen Sensor
+    Performance Comparison") -- they're valid evidence in ordinary top-k
+    retrieval, but that heading must not be eligible for single/multi-
+    product name detection below: a query merely containing a generic word
+    from it (e.g. "sensor") would otherwise get hard-scoped to only this
+    document, silently excluding the actual product catalogue it discusses.
+    Proven necessary by testing: "Is the FIXaHY sensor PESO approved..."
+    matched "sensor" against this document's own title and hard-scoped
+    retrieval to it, hiding the catalogue chunk that actually answers the
+    question. Detected by filename pattern since these documents don't
+    represent one purchasable product the way a catalogue does."""
+    name = document_name.lower()
+    return not any(kw in name for kw in ("comparison", "competitor"))
+
+
 def _detect_mentioned_products(query: str, product_names: list[str]) -> list[str]:
     """Which of the currently indexed products, if any, the query actually
     names -- 0 for a generic question, 1 to scope to that product, 2+ for a
@@ -499,7 +516,11 @@ def retrieve(query: str, top_k: int = 8) -> dict[str, Any]:
             raise RetrieverError(f"Vector search failed: {e}") from e
     else:
         all_metadata = collection.get(include=["metadatas"])["metadatas"]
-        product_names = sorted({m["product_name"] for m in all_metadata if m.get("product_name")})
+        product_names = sorted({
+            m["product_name"]
+            for m in all_metadata
+            if m.get("product_name") and _is_single_product_document(m.get("document_name", ""))
+        })
         mentioned = _detect_mentioned_products(query, product_names)
 
         if len(mentioned) == 1:

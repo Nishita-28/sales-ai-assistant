@@ -11,4 +11,4 @@ Risk flag:
 None / Certification / Accuracy / Safety / Pricing / Legal / Delivery / Unknown
 
 Customer-facing wording:
-<Only if a customer-facing wording was requested. Keep it short and cautious. Omit this section entirely if it was not requested.>
+<Only if a customer-facing wording was requested. A plain-language rewrite of the Short answer -- same meaning, same caveats, no added claims or marketing language, never more confident than the Short answer. Omit this section entirely if it was not requested.>

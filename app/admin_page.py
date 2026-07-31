@@ -11,14 +11,20 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+from app import theme
 from app.claims_store import load_claims, save_claims
 from app.feedback_store import (
-    count_correct,
+    clear_all_feedback,
+    clear_feedback_before,
+    count_feedback,
+    daily_feedback_counts,
     delete_feedback,
+    list_all_feedback,
     most_reported_question,
     recent_reports,
     resolve_feedback,
 )
+from app.requirements_store import delete_requirement, list_requirements
 from app.restricted_policy import KNOWN_CATEGORIES, PolicyEntry, load_entries, save_entries
 from app.retriever import (
     RetrieverError,
@@ -256,14 +262,162 @@ def _confirm_delete_report_dialog(report_id: int) -> None:
         st.rerun()
 
 
-def _render_feedback_tab() -> None:
+# Below this many active days of feedback, daily points are too sparse to
+# read as a trend (e.g. a single event on a given day swings that day's
+# accuracy to a meaningless 0% or 100%) -- fall back to weekly buckets
+# instead. Above it, daily is fine-grained enough to be useful.
+MIN_ACTIVE_DAYS_FOR_DAILY_CHART = 5
+
+# Need at least this many points on the x-axis for a line to show a trend
+# at all -- below it, a chart would just be one dot, so show an empty
+# state instead.
+MIN_CHART_POINTS = 2
+
+
+def _render_accuracy_section() -> None:
+    """AI Performance: an accuracy trend built from the same Correct/Wrong/
+    Unsafe events the Assistant page's feedback buttons record.
+
+    IMPORTANT CAVEAT (this is why the metric is labeled "Feedback Accuracy",
+    not "AI Accuracy"): this only reflects the answers a rep bothered to
+    rate, not a random sample of every answer given. If feedback is sparse,
+    or reps only click a button when something's wrong (a common real-world
+    bias -- correct answers rarely get acknowledged), this number will skew
+    pessimistic and should not be read as the model's true accuracy.
+    """
+    rows = daily_feedback_counts()
+    if not rows:
+        st.info(
+            "No feedback recorded yet. Once reps start marking answers Correct, "
+            "Wrong, or Unsafe on the Assistant page, accuracy trends will appear here."
+        )
+        st.divider()
+        return
+
+    daily = pd.DataFrame([dict(r) for r in rows])
+    daily["day"] = pd.to_datetime(daily["day"])
+
+    correct_total = int(daily["correct"].sum())
+    wrong_total = int(daily["wrong"].sum())
+    unsafe_total = int(daily["unsafe"].sum())
+    total = correct_total + wrong_total + unsafe_total
+    feedback_accuracy = (correct_total / total * 100) if total else 0.0
+
+    st.subheader("AI Performance")
+    st.caption(
+        '"Feedback Accuracy" is the share of *rated* answers marked Correct -- '
+        "meaningful only if reps give feedback consistently, not just on failures."
+    )
+
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Feedback Accuracy", f"{feedback_accuracy:.0f}%")
+    m2.metric("Total Events", total, help="Total Feedback Events")
+    m3.metric("Correct", correct_total)
+    m4.metric("Wrong", wrong_total)
+    m5.metric("Unsafe", unsafe_total)
+
+    active_days = len(daily)
+    if active_days >= MIN_ACTIVE_DAYS_FOR_DAILY_CHART:
+        chart_source = daily.rename(columns={"day": "period"})
+        granularity = "daily"
+    else:
+        weekly = daily.set_index("day")[["correct", "wrong", "unsafe"]].resample("W-MON").sum()
+        weekly = weekly[(weekly["correct"] + weekly["wrong"] + weekly["unsafe"]) > 0]
+        chart_source = weekly.reset_index().rename(columns={"day": "period"})
+        granularity = "weekly"
+
+    with st.container(border=theme.is_enterprise_theme()):
+        st.markdown("**AI Accuracy Over Time**")
+        if len(chart_source) < MIN_CHART_POINTS:
+            st.caption(
+                "Not enough history yet to show a trend -- check back once feedback "
+                "has accumulated across more days."
+            )
+        else:
+            chart_source = chart_source.copy()
+            chart_source["Accuracy %"] = (
+                chart_source["correct"]
+                / (chart_source["correct"] + chart_source["wrong"] + chart_source["unsafe"])
+                * 100
+            )
+            st.caption(f"Showing {granularity} feedback accuracy.")
+            st.line_chart(
+                chart_source.set_index("period")["Accuracy %"],
+                color="#184fa3",
+                height=260,
+            )
+
+    st.divider()
+
+
+@st.dialog("Clear feedback data?")
+def _confirm_clear_feedback_dialog(cutoff_date: Optional[str]) -> None:
+    if cutoff_date:
+        count = count_feedback(before=cutoff_date)
+        st.write(
+            f"This permanently deletes {count} feedback event(s) recorded before "
+            f"{cutoff_date}. This cannot be undone."
+        )
+    else:
+        count = count_feedback()
+        st.write(
+            f"This permanently deletes all {count} feedback event(s) and resets the "
+            "AI Performance chart above. This cannot be undone."
+        )
     col1, col2 = st.columns(2)
-    col1.metric("Correct answers", count_correct())
+    if col1.button("Delete", type="primary", use_container_width=True, disabled=count == 0):
+        if cutoff_date:
+            clear_feedback_before(cutoff_date)
+        else:
+            clear_all_feedback()
+        st.rerun()
+    if col2.button("Cancel", use_container_width=True):
+        st.rerun()
+
+
+def _render_feedback_data_management() -> None:
+    """Lets an admin edit the data behind the AI Performance chart directly
+    -- delete one event, or bulk-clear old/test data -- rather than only
+    ever being able to act on active wrong/unsafe reports."""
+    with st.expander("Manage feedback data"):
+        st.caption(
+            "Delete individual events below, or bulk-clear data that's skewing the "
+            "chart above (e.g. old test entries)."
+        )
+
+        col1, col2, col3 = st.columns([2, 1, 1])
+        cutoff = col1.date_input("Clear events recorded before", value=None)
+        if col2.button("Clear before date", use_container_width=True, disabled=cutoff is None):
+            _confirm_clear_feedback_dialog(cutoff.isoformat())
+        if col3.button("Clear all", use_container_width=True):
+            _confirm_clear_feedback_dialog(None)
+
+        st.divider()
+
+        rows = list_all_feedback()
+        if not rows:
+            st.caption("No feedback events recorded.")
+            return
+
+        st.caption(f"Most recent {len(rows)} event(s):")
+        for row in rows:
+            c1, c2, c3 = st.columns([2, 5, 1])
+            c1.caption(f"{row['created_at']} · {row['verdict'].capitalize()}")
+            c2.caption(row["question"])
+            if c3.button(
+                "", icon=":material/delete:", key=f"del-fb-{row['id']}", help="Delete this event"
+            ):
+                delete_feedback(row["id"])
+                st.rerun()
+
+
+def _render_feedback_tab() -> None:
+    _render_accuracy_section()
+    _render_feedback_data_management()
 
     reported = most_reported_question()
-    col2.metric("Most reported question -- report count", reported[1] if reported else 0)
     if reported:
-        st.caption(f'Most reported question: "{reported[0]}"')
+        st.caption(f'Most reported question ({reported[1]}x): "{reported[0]}"')
 
     st.subheader("Active Wrong / Unsafe reports")
     reports = recent_reports()
@@ -287,6 +441,38 @@ def _render_feedback_tab() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Customer Requirements tab -- what the Customer Requirements page's form
+# actually saves. Submissions are permanent until an admin deletes one here.
+# ---------------------------------------------------------------------------
+@st.dialog("Delete this requirement?")
+def _confirm_delete_requirement_dialog(requirement_id: int, customer_name: str, company: str) -> None:
+    st.write(f"Permanently delete the requirement captured for **{customer_name}** ({company})? This cannot be undone.")
+    col1, col2 = st.columns(2)
+    if col1.button("Delete", type="primary", use_container_width=True):
+        delete_requirement(requirement_id)
+        st.rerun()
+    if col2.button("Cancel", use_container_width=True):
+        st.rerun()
+
+
+def _render_requirements_admin_tab() -> None:
+    rows = list_requirements()
+    if not rows:
+        st.caption("No customer requirements captured yet.")
+        return
+
+    for row in rows:
+        with st.container(border=True):
+            st.markdown(f"**{row['customer_name']}** -- {row['company']} · {row['created_at']}")
+            area = row["installation_area"]
+            if row["hazard_zone"]:
+                area += f" ({row['hazard_zone']})"
+            st.caption(f"{row['application'] or 'No application noted'} | {row['install_type']} | {area}")
+            if st.button("Delete", key=f"delete-req-{row['id']}", use_container_width=True):
+                _confirm_delete_requirement_dialog(row["id"], row["customer_name"], row["company"])
+
+
+# ---------------------------------------------------------------------------
 # Page entry point
 # ---------------------------------------------------------------------------
 def render_admin_page() -> None:
@@ -299,8 +485,8 @@ def render_admin_page() -> None:
 
     _render_rebuild_status()
 
-    documents_tab, approved_tab, restricted_tab, feedback_tab = st.tabs(
-        ["Documents", "Approved Claims", "Restricted Claims", "Feedback"]
+    documents_tab, approved_tab, restricted_tab, feedback_tab, requirements_tab = st.tabs(
+        ["Documents", "Approved Claims", "Restricted Claims", "Feedback", "Customer Requirements"]
     )
 
     with documents_tab:
@@ -314,3 +500,6 @@ def render_admin_page() -> None:
 
     with feedback_tab:
         _render_feedback_tab()
+
+    with requirements_tab:
+        _render_requirements_admin_tab()

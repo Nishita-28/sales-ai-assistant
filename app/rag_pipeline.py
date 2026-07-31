@@ -67,8 +67,10 @@ if __name__ == "__main__":
     print(f"Risk flag: {result['risk_flag']}")
     print(f"Answer: {result['answer']}")
     print("Sources:")
-    for name, label in result["sources"]:
+    for name, label, text in result["sources"]:
         print(f"  - {name} ({label})")
+        if text:
+            print(f"      \"{text}\"")
     if result["customer_wording"]:
         print(f"Customer-facing wording: {result['customer_wording']}")
     else:

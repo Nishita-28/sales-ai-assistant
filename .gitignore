@@ -10,3 +10,4 @@ data/approved_docs/
 *.temp
 data/chroma_index/
 data/feedback.db
+data/requirements.db
