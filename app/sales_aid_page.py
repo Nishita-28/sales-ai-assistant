@@ -9,7 +9,7 @@ import streamlit as st
 from app import theme
 from app.response_generator import ResponseGeneratorError
 from app.retriever import RetrieverError
-from app.sales_aid_generator import generate_sales_aid
+from app.sales_aid_generator import finalize_sales_aid, stream_sales_aid
 
 EXAMPLE_USE_CASE = (
     "Multiple potential leak spots in close vicinity, with 100% H2 contained in pipelines."
@@ -37,13 +37,16 @@ def render_sales_aid_page() -> None:
         if not use_case.strip():
             st.error("Describe the use case first.")
         else:
-            with st.spinner("Checking approved documents..."):
-                try:
-                    result = generate_sales_aid(use_case, compare_against)
-                except (RetrieverError, ResponseGeneratorError) as e:
-                    st.error(f"Something went wrong generating the sales aid: {e}")
-                else:
-                    st.session_state.sales_aid_result = result
+            try:
+                with st.spinner("Checking approved documents..."):
+                    matches, text_stream = stream_sales_aid(use_case, compare_against)
+                with st.container(border=theme.is_enterprise_theme()):
+                    raw_reply = st.write_stream(text_stream)
+            except (RetrieverError, ResponseGeneratorError) as e:
+                st.error(f"Something went wrong generating the sales aid: {e}")
+            else:
+                st.session_state.sales_aid_result = finalize_sales_aid(use_case, matches, raw_reply)
+                st.rerun()
 
     result = st.session_state.get("sales_aid_result")
     if not result:

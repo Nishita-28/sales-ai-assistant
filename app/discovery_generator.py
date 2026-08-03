@@ -15,11 +15,11 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator, Optional
 
 from app.claim_checker import check_restricted_claims
 from app.generation_helpers import build_context_block, dedupe_sources, extract_list_items, split_sections
-from app.response_generator import ResponseGeneratorError, _call_llm
+from app.response_generator import ResponseGeneratorError, _call_llm_stream
 
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 DISCOVERY_PROMPT_PATH = PROMPTS_DIR / "discovery_questions_prompt.md"
@@ -148,10 +148,18 @@ def _parse_discovery_reply(raw_text: str) -> list[RightToWinPoint]:
     return points
 
 
-def generate_discovery_questions(use_case_description: str, top_k: int = 8) -> DiscoveryResult:
-    """Retrieves relevant KB excerpts for the described use case and asks
-    the LLM to identify documented Right-to-Win points, each with its own
-    supporting evidence and exploratory discovery questions."""
+def stream_discovery_questions(
+    use_case_description: str, top_k: int = 8
+) -> tuple[list[dict[str, Any]], Iterator[str]]:
+    """Streaming counterpart to generate_discovery_questions(). Returns
+    (matches, text_stream) -- stream text_stream to the UI (e.g. via
+    st.write_stream) for live display of the raw reply as it's generated,
+    then pass matches and the full text it returns to
+    finalize_discovery_questions() to get the parsed, ranked Right-to-Win
+    points. The raw reply is structured (repeating "Right to Win: ..."
+    blocks), so what streams live is that raw text, not pre-rendered
+    cards -- the properly parsed cards render once finalize_ runs, same
+    pattern as the Assistant page's streamed answer."""
     from app.retriever import retrieve
 
     retrieval = retrieve(use_case_description, top_k=top_k)
@@ -163,19 +171,35 @@ def generate_discovery_questions(use_case_description: str, top_k: int = 8) -> D
         f"Customer use case: {use_case_description}"
     )
 
-    try:
-        raw_reply = _call_llm(system_prompt, user_message)
-    except ResponseGeneratorError:
-        raise
-    except Exception as e:
-        raise ResponseGeneratorError(f"Discovery question generation failed: {e}") from e
+    def _gen() -> Iterator[str]:
+        try:
+            yield from _call_llm_stream(system_prompt, user_message)
+        except ResponseGeneratorError:
+            raise
+        except Exception as e:
+            raise ResponseGeneratorError(f"Discovery question generation failed: {e}") from e
 
+    return matches, _gen()
+
+
+def finalize_discovery_questions(matches: list[dict[str, Any]], raw_reply: str) -> DiscoveryResult:
+    """Builds the final DiscoveryResult from a completed raw reply -- call
+    with whatever stream_discovery_questions() produced, once it's fully
+    streamed."""
     right_to_win = _parse_discovery_reply(raw_reply)
-
     return DiscoveryResult(
         right_to_win=right_to_win,
         sources=dedupe_sources(matches),
     )
+
+
+def generate_discovery_questions(use_case_description: str, top_k: int = 8) -> DiscoveryResult:
+    """Non-streaming convenience wrapper around stream_discovery_questions()
+    + finalize_discovery_questions(), for CLI/scripted callers with no UI
+    to stream into."""
+    matches, text_stream = stream_discovery_questions(use_case_description, top_k)
+    raw_reply = "".join(text_stream)
+    return finalize_discovery_questions(matches, raw_reply)
 
 
 def _parse_recommendation_reply(raw_text: str) -> tuple[list[str], str, str, str]:
@@ -215,44 +239,58 @@ def _is_recommendable_product_document(document_name: str) -> bool:
     return not document_name.lower().endswith(".xlsx")
 
 
-def generate_recommendation(
+def _fetch_recommendable_matches(query: str, top_k: int) -> list[dict[str, Any]]:
+    """Retrieves real product documents only (see
+    _is_recommendable_product_document), excluding non-product documents
+    (e.g. the sales-history spreadsheet) from the vector search itself
+    rather than filtering them out of the results afterward. Proven
+    necessary by testing: for a use case phrased as a narrative (use case
+    description + interview-style answers concatenated), the spreadsheet's
+    rows -- which read a lot like a discovery-call description -- can
+    dominate the ranking so completely that they occupy the *entire*
+    top-k regardless of how wide it's fetched, leaving zero product
+    matches behind no matter how generous the over-fetch is. Excluding at
+    the query level guarantees the returned matches are usable."""
+    from app.retriever import all_document_names, retrieve
+
+    exclude = {name for name in all_document_names() if not _is_recommendable_product_document(name)}
+    retrieval = retrieve(query, top_k=top_k, exclude_document_names=exclude)
+    return retrieval.get("matches") or []
+
+
+def insufficient_recommendation(answered_count: int) -> RecommendationResult:
+    return RecommendationResult(
+        confirmed_priorities=[],
+        outcome="Insufficient",
+        recommendation="Not enough discovery answers have been captured yet to make a recommendation.",
+        missing_information=(
+            f"Record answers for at least {MIN_ANSWERS_FOR_RECOMMENDATION} discovery questions "
+            f"(currently have {answered_count}) before requesting a recommendation."
+        ),
+        sources=[],
+        risk="None",
+    )
+
+
+def stream_recommendation(
     use_case_description: str,
     qa_pairs: list[tuple[str, str]],
     top_k: int = 15,
-) -> RecommendationResult:
-    """Matches the customer's captured discovery answers against the
-    knowledge base and returns a recommendation, a trade-off comparison, or
-    an explicit "not enough evidence yet" result. qa_pairs is the full list
-    of (question, answer) pairs the rep recorded; unanswered ones (blank
-    answer) are ignored."""
-    from app.retriever import retrieve
-
+) -> tuple[Optional[list[dict[str, Any]]], Optional[str], Optional[Iterator[str]]]:
+    """Streaming counterpart to generate_recommendation(). qa_pairs is the
+    full list of (question, answer) pairs the rep recorded; unanswered
+    ones (blank answer) are ignored. Returns (None, None, None) if there
+    isn't enough evidence yet -- no LLM call is made in that case; the
+    caller should render insufficient_recommendation(answered_count)
+    directly instead. Otherwise returns (matches, qa_block, text_stream):
+    stream text_stream to the UI, then pass matches, qa_block, and the
+    full text it returns to finalize_recommendation()."""
     answered = [(q, a.strip()) for q, a in qa_pairs if a and a.strip()]
-
     if len(answered) < MIN_ANSWERS_FOR_RECOMMENDATION:
-        return RecommendationResult(
-            confirmed_priorities=[],
-            outcome="Insufficient",
-            recommendation="Not enough discovery answers have been captured yet to make a recommendation.",
-            missing_information=(
-                f"Record answers for at least {MIN_ANSWERS_FOR_RECOMMENDATION} discovery questions "
-                "(currently have "
-                f"{len(answered)}) before requesting a recommendation."
-            ),
-            sources=[],
-            risk="None",
-        )
+        return None, None, None
 
     query = use_case_description + " " + " ".join(a for _, a in answered)
-    # Over-fetch, then drop non-product documents (e.g. the sales-history
-    # spreadsheet) before truncating to top_k -- otherwise filtering could
-    # leave fewer than top_k usable matches even when real product
-    # documents would have scored well enough to be included.
-    retrieval = retrieve(query, top_k=top_k * 2)
-    matches = [
-        m for m in (retrieval.get("matches") or [])
-        if _is_recommendable_product_document((m.get("metadata") or {}).get("document_name", ""))
-    ][:top_k]
+    matches = _fetch_recommendable_matches(query, top_k)
 
     qa_block = "\n".join(f"Q: {q}\nA: {a}" for q, a in answered)
     system_prompt = _load_prompt(RECOMMENDATION_PROMPT_PATH)
@@ -262,13 +300,23 @@ def generate_recommendation(
         f"Customer's discovery call answers:\n{qa_block}"
     )
 
-    try:
-        raw_reply = _call_llm(system_prompt, user_message)
-    except ResponseGeneratorError:
-        raise
-    except Exception as e:
-        raise ResponseGeneratorError(f"Recommendation generation failed: {e}") from e
+    def _gen() -> Iterator[str]:
+        try:
+            yield from _call_llm_stream(system_prompt, user_message)
+        except ResponseGeneratorError:
+            raise
+        except Exception as e:
+            raise ResponseGeneratorError(f"Recommendation generation failed: {e}") from e
 
+    return matches, qa_block, _gen()
+
+
+def finalize_recommendation(
+    matches: list[dict[str, Any]], qa_block: str, raw_reply: str
+) -> RecommendationResult:
+    """Builds the final RecommendationResult from a completed raw reply --
+    call with whatever stream_recommendation() produced, once it's fully
+    streamed."""
     confirmed_priorities, outcome, recommendation, missing_information = _parse_recommendation_reply(raw_reply)
 
     source_text = " ".join(m.get("text", "") for m in matches)
@@ -282,6 +330,22 @@ def generate_recommendation(
         sources=dedupe_sources(matches),
         risk=claim_result.category,
     )
+
+
+def generate_recommendation(
+    use_case_description: str,
+    qa_pairs: list[tuple[str, str]],
+    top_k: int = 15,
+) -> RecommendationResult:
+    """Non-streaming convenience wrapper around stream_recommendation() +
+    finalize_recommendation(), for CLI/scripted callers with no UI to
+    stream into."""
+    answered_count = sum(1 for _, a in qa_pairs if a and a.strip())
+    matches, qa_block, text_stream = stream_recommendation(use_case_description, qa_pairs, top_k)
+    if text_stream is None:
+        return insufficient_recommendation(answered_count)
+    raw_reply = "".join(text_stream)
+    return finalize_recommendation(matches, qa_block, raw_reply)
 
 
 # ---------------------------------------------------------------------------

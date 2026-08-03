@@ -16,7 +16,7 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from app.claim_checker import check_restricted_claims
 from app.generation_helpers import (
@@ -26,7 +26,7 @@ from app.generation_helpers import (
     extract_list_items,
     split_sections,
 )
-from app.response_generator import ALLOW_CUSTOMER_FACING_OUTPUT, ResponseGeneratorError, _call_llm
+from app.response_generator import ALLOW_CUSTOMER_FACING_OUTPUT, ResponseGeneratorError, _call_llm_stream
 
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 SALES_AID_PROMPT_PATH = PROMPTS_DIR / "sales_aid_prompt.md"
@@ -97,14 +97,19 @@ def _parse_reply(raw_text: str) -> tuple[list[str], str, str, list[str], str]:
     return customer_priorities, title, use_case_framing, comparison, customer_summary
 
 
-def generate_sales_aid(
+def stream_sales_aid(
     use_case_description: str,
     compare_against: str = "",
     top_k: int = 12,
-) -> SalesAidResult:
-    """Retrieves KB excerpts relevant to the use case (and, if given, the
-    named competing technology/product) and asks the LLM to produce a short
-    comparison document grounded strictly in those excerpts."""
+) -> tuple[list[dict[str, Any]], Iterator[str]]:
+    """Streaming counterpart to generate_sales_aid(). Returns (matches,
+    text_stream) -- stream text_stream to the UI (e.g. via st.write_stream)
+    for live display of the raw reply as it's generated, then pass matches
+    and the full text it returns to finalize_sales_aid(). The raw reply is
+    structured (priorities/title/framing/comparison table/summary), so
+    what streams live is that raw text, not the final rendered
+    layout -- the properly parsed sections render once finalize_ runs,
+    same pattern as the Assistant page's streamed answer."""
     from app.retriever import retrieve
 
     query = use_case_description
@@ -128,13 +133,22 @@ def generate_sales_aid(
         f"Customer use case: {use_case_description}"
     )
 
-    try:
-        raw_reply = _call_llm(system_prompt, user_message)
-    except ResponseGeneratorError:
-        raise
-    except Exception as e:
-        raise ResponseGeneratorError(f"Sales aid generation failed: {e}") from e
+    def _gen() -> Iterator[str]:
+        try:
+            yield from _call_llm_stream(system_prompt, user_message)
+        except ResponseGeneratorError:
+            raise
+        except Exception as e:
+            raise ResponseGeneratorError(f"Sales aid generation failed: {e}") from e
 
+    return matches, _gen()
+
+
+def finalize_sales_aid(
+    use_case_description: str, matches: list[dict[str, Any]], raw_reply: str
+) -> SalesAidResult:
+    """Builds the final SalesAidResult from a completed raw reply -- call
+    with whatever stream_sales_aid() produced, once it's fully streamed."""
     customer_priorities, title, use_case_framing, comparison, customer_summary = _parse_reply(raw_reply)
 
     full_text = "\n".join([title, use_case_framing, *comparison, customer_summary])
@@ -151,6 +165,19 @@ def generate_sales_aid(
         risk=claim_result.category,
         sources=dedupe_sources(matches),
     )
+
+
+def generate_sales_aid(
+    use_case_description: str,
+    compare_against: str = "",
+    top_k: int = 12,
+) -> SalesAidResult:
+    """Non-streaming convenience wrapper around stream_sales_aid() +
+    finalize_sales_aid(), for CLI/scripted callers with no UI to stream
+    into."""
+    matches, text_stream = stream_sales_aid(use_case_description, compare_against, top_k)
+    raw_reply = "".join(text_stream)
+    return finalize_sales_aid(use_case_description, matches, raw_reply)
 
 
 # ---------------------------------------------------------------------------

@@ -13,8 +13,11 @@ import streamlit as st
 from app import theme
 from app.discovery_generator import (
     MIN_ANSWERS_FOR_RECOMMENDATION,
-    generate_discovery_questions,
-    generate_recommendation,
+    finalize_discovery_questions,
+    finalize_recommendation,
+    insufficient_recommendation,
+    stream_discovery_questions,
+    stream_recommendation,
 )
 from app.response_generator import ResponseGeneratorError
 from app.retriever import RetrieverError
@@ -51,16 +54,19 @@ def render_discovery_page() -> None:
         if not use_case.strip():
             st.error("Describe the use case first.")
         else:
-            with st.spinner("Checking approved documents..."):
-                try:
-                    result = generate_discovery_questions(use_case)
-                except (RetrieverError, ResponseGeneratorError) as e:
-                    st.error(f"Something went wrong generating questions: {e}")
-                else:
-                    st.session_state.discovery_result = result
-                    st.session_state.discovery_use_case = use_case
-                    st.session_state.discovery_answers = {}
-                    st.session_state.pop("discovery_recommendation", None)
+            try:
+                with st.spinner("Checking approved documents..."):
+                    matches, text_stream = stream_discovery_questions(use_case)
+                with st.container(border=theme.is_enterprise_theme()):
+                    raw_reply = st.write_stream(text_stream)
+            except (RetrieverError, ResponseGeneratorError) as e:
+                st.error(f"Something went wrong generating questions: {e}")
+            else:
+                st.session_state.discovery_result = finalize_discovery_questions(matches, raw_reply)
+                st.session_state.discovery_use_case = use_case
+                st.session_state.discovery_answers = {}
+                st.session_state.pop("discovery_recommendation", None)
+                st.rerun()
 
     result = st.session_state.get("discovery_result")
     if not result:
@@ -117,15 +123,24 @@ def render_discovery_page() -> None:
     if recommend_clicked:
         all_questions = [q for point in result.right_to_win for q in point.questions]
         qa_pairs = [(q, answers.get(q, "")) for q in all_questions]
-        with st.spinner("Matching answers against approved documents..."):
-            try:
-                recommendation = generate_recommendation(
+        try:
+            with st.spinner("Matching answers against approved documents..."):
+                matches, qa_block, text_stream = stream_recommendation(
                     st.session_state.get("discovery_use_case", ""), qa_pairs
                 )
-            except (RetrieverError, ResponseGeneratorError) as e:
-                st.error(f"Something went wrong generating a recommendation: {e}")
+            if text_stream is None:
+                # Shouldn't happen -- the button above is disabled below the
+                # answer floor -- but stay honest if it somehow does.
+                recommendation = insufficient_recommendation(answered_count)
             else:
-                st.session_state.discovery_recommendation = recommendation
+                with st.container(border=theme.is_enterprise_theme()):
+                    raw_reply = st.write_stream(text_stream)
+                recommendation = finalize_recommendation(matches, qa_block, raw_reply)
+        except (RetrieverError, ResponseGeneratorError) as e:
+            st.error(f"Something went wrong generating a recommendation: {e}")
+        else:
+            st.session_state.discovery_recommendation = recommendation
+            st.rerun()
 
     recommendation = st.session_state.get("discovery_recommendation")
     if recommendation:

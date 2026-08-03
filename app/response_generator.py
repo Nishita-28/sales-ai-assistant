@@ -5,14 +5,16 @@ from __future__ import annotations
 import os
 import re
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 
 from dotenv import load_dotenv
 
 from app.claim_checker import check_restricted_claims
 from app.intent import Intent, UNKNOWN_INTENT
+from app.retriever import is_ambiguous_product_reference
 
 load_dotenv()
 
@@ -22,6 +24,7 @@ load_dotenv()
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 SYSTEM_PROMPT_PATH = PROMPTS_DIR / "system_prompt.md"
 ANSWER_FORMAT_PATH = PROMPTS_DIR / "answer_format.md"
+CUSTOMER_WORDING_PROMPT_PATH = PROMPTS_DIR / "customer_wording_prompt.md"
 
 
 LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "openai").strip().lower()
@@ -52,6 +55,11 @@ NO_SOURCE_MESSAGE = (
     "technical or management team."
 )
 
+AMBIGUOUS_PRODUCT_MESSAGE = (
+    "Could you specify which product you are referring to? Multiple products in the "
+    "documentation may apply."
+)
+
 
 class ResponseGeneratorError(RuntimeError):
     """Wraps prompt-loading/LLM failures so callers can catch one specific
@@ -60,14 +68,20 @@ class ResponseGeneratorError(RuntimeError):
 
 @dataclass
 class GeneratedAnswer:
-    """The answer returned to the UI, plus its sources, confidence, risk
-    category, and optional customer-facing draft."""
+    """The answer returned to the UI, plus its sources, confidence, and risk
+    category. Customer-facing wording is NOT generated here -- it's a
+    separate, on-demand call (see generate_customer_wording()) made only
+    when a rep actually asks for it, since most answers never need one and
+    generating it eagerly on every question roughly doubled completion
+    time for no benefit. customer_wording_blocked tells the UI upfront
+    whether that option should even be offered, without needing an LLM
+    call to find out."""
 
     answer: str
     sources: list[tuple[str, str, str]]
     confidence: str  # "High" or "Low"
     risk: str  # risk category, or "None"
-    customer_wording: Optional[str]
+    customer_wording_blocked: bool
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -75,27 +89,15 @@ class GeneratedAnswer:
             "sources": self.sources,
             "confidence": self.confidence,
             "risk": self.risk,
-            "customer_wording": self.customer_wording,
+            "customer_wording_blocked": self.customer_wording_blocked,
         }
-
-
-def _unsupported_answer(question: str) -> GeneratedAnswer:
-    # Still scan the question itself for restricted terms so the risk badge
-    # stays meaningful even with no draft answer or sources.
-    claim_result = check_restricted_claims(question, "", source_text="")
-    return GeneratedAnswer(
-        answer=NO_SOURCE_MESSAGE,
-        sources=[],
-        confidence="Low",
-        risk=claim_result.category,
-        customer_wording=None,
-    )
 
 
 # ---------------------------------------------------------------------------
 # Prompt loading
 # ---------------------------------------------------------------------------
 _system_prompt_cache: Optional[str] = None
+_customer_wording_prompt_cache: Optional[str] = None
 
 
 def _load_system_prompt() -> str:
@@ -109,6 +111,16 @@ def _load_system_prompt() -> str:
             raise ResponseGeneratorError(f"Failed to read prompt file: {e}") from e
         _system_prompt_cache = f"{base}\n\nRespond using exactly this format:\n\n{answer_format}"
     return _system_prompt_cache
+
+
+def _load_customer_wording_prompt() -> str:
+    global _customer_wording_prompt_cache
+    if _customer_wording_prompt_cache is None:
+        try:
+            _customer_wording_prompt_cache = CUSTOMER_WORDING_PROMPT_PATH.read_text(encoding="utf-8").strip()
+        except OSError as e:
+            raise ResponseGeneratorError(f"Failed to read prompt file: {e}") from e
+    return _customer_wording_prompt_cache
 
 
 # ---------------------------------------------------------------------------
@@ -157,20 +169,9 @@ def _build_context_block(matches: list[dict[str, Any]]) -> str:
     return "\n\n".join(blocks)
 
 
-def _build_user_message(
-    question: str,
-    matches: list[dict[str, Any]],
-    intent: str,
-    want_customer_wording: bool,
-) -> str:
-    wording_line = (
-        "A customer-facing wording is requested -- include that section."
-        if want_customer_wording
-        else "No customer-facing wording is requested -- omit that section."
-    )
+def _build_user_message(question: str, matches: list[dict[str, Any]], intent: str) -> str:
     return (
-        f"Question intent: {intent}\n"
-        f"{wording_line}\n\n"
+        f"Question intent: {intent}\n\n"
         f"Approved knowledge base excerpts:\n{_build_context_block(matches)}\n\n"
         f"Question: {question}"
     )
@@ -233,13 +234,8 @@ def _call_offline_mock(user_message: str) -> str:
     """A fixed, well-formed reply so the pipeline is testable without a
     real API key."""
     return (
-        "Short answer:\n"
         "[offline_mock] Placeholder answer -- no real LLM was called. "
-        "Set LLM_PROVIDER=openai (or azure_openai) with a valid key to get a real answer.\n\n"
-        "Sources:\n- (see excerpts)\n\n"
-        "Confidence:\nMedium\n\n"
-        "Risk flag:\nUnknown\n\n"
-        "Customer-facing wording:\n[offline_mock] Placeholder customer-facing wording.\n"
+        "Set LLM_PROVIDER=openai (or azure_openai) with a valid key to get a real answer."
     )
 
 
@@ -275,35 +271,82 @@ def _call_llm(system_prompt: str, user_message: str, max_tokens: Optional[int] =
     )
 
 
-# ---------------------------------------------------------------------------
-# Parsing the LLM's reply
-# ---------------------------------------------------------------------------
-_SECTION_RE = re.compile(
-    r"^(Short answer|Sources|Confidence|Risk flag|Customer-facing wording):\s*$",
-    re.MULTILINE | re.IGNORECASE,
-)
+def _call_llm_stream_raw(system_prompt: str, user_message: str) -> Iterator[str]:
+    """Yields text deltas exactly as the provider sends them -- for OpenAI/
+    Azure this is roughly token-by-token, which redraws the UI so often on
+    a short answer that it reads as a flicker rather than a smooth
+    "typing" effect. _call_llm_stream() wraps this with batching before
+    handing it to callers; nothing outside this module should call the
+    raw version directly."""
+    if LLM_PROVIDER == "offline_mock":
+        # Yields a few words at a time so the offline/dev path exercises
+        # the same streaming UI code as a real provider.
+        words = _call_offline_mock(user_message).split(" ")
+        for i in range(0, len(words), 3):
+            yield " ".join(words[i : i + 3]) + (" " if i + 3 < len(words) else "")
+        return
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_message},
+    ]
+
+    if LLM_PROVIDER == "azure_openai":
+        client = _get_azure_openai_chat_client()
+        stream = client.chat.completions.create(
+            model=AZURE_OPENAI_DEPLOYMENT, messages=messages, temperature=0.2, stream=True
+        )
+    elif LLM_PROVIDER == "openai":
+        client = _get_openai_chat_client()
+        stream = client.chat.completions.create(
+            model=OPENAI_MODEL, messages=messages, temperature=0.2, stream=True
+        )
+    else:
+        raise ResponseGeneratorError(
+            f"Unknown LLM_PROVIDER '{LLM_PROVIDER}' -- expected 'openai', 'azure_openai', or 'offline_mock'."
+        )
+
+    for chunk in stream:
+        delta = chunk.choices[0].delta.content
+        if delta:
+            yield delta
 
 
-def _parse_llm_response(raw_text: str) -> dict[str, str]:
-    """Splits the reply into its labeled sections, keyed by lowercase
-    header. A skipped section is simply absent from the result."""
-    sections: dict[str, str] = {}
-    matches = list(_SECTION_RE.finditer(raw_text))
-    for i, match in enumerate(matches):
-        header = match.group(1).strip().lower().replace(" ", "_").replace("-", "_")
-        start = match.end()
-        end = matches[i + 1].start() if i + 1 < len(matches) else len(raw_text)
-        sections[header] = raw_text[start:end].strip()
-    return sections
+# Below this many buffered characters, a batch isn't flushed on size alone
+# -- avoids a redraw every couple of characters on a fast stream.
+_STREAM_BATCH_MIN_CHARS = 20
+
+# Above this many seconds since the last flush, the buffer is flushed
+# regardless of size -- keeps the display moving during a slower stretch
+# instead of sitting on a half-formed word.
+_STREAM_BATCH_MAX_WAIT_SECONDS = 0.1
 
 
-def _extract_customer_wording(sections: dict[str, str]) -> Optional[str]:
-    text = sections.get("customer_facing_wording")
-    if not text:
-        return None
-    if text.lower().startswith(("not requested", "n/a", "none", "omit")):
-        return None
-    return text
+def _batch_text_stream(chunks: Iterator[str]) -> Iterator[str]:
+    """Buffers small text deltas and re-yields them in fewer, larger
+    pieces, so the UI redraws in smooth steps instead of on every raw
+    delta from the API."""
+    buffer = ""
+    last_flush = time.monotonic()
+    for chunk in chunks:
+        buffer += chunk
+        now = time.monotonic()
+        if len(buffer) >= _STREAM_BATCH_MIN_CHARS or (now - last_flush) >= _STREAM_BATCH_MAX_WAIT_SECONDS:
+            yield buffer
+            buffer = ""
+            last_flush = now
+    if buffer:
+        yield buffer
+
+
+def _call_llm_stream(system_prompt: str, user_message: str) -> Iterator[str]:
+    """Streaming counterpart to _call_llm(): yields text in smooth,
+    batched pieces as the LLM generates them, instead of returning the
+    full reply only once it's complete. Nothing in this generator's body
+    runs until it's first iterated (standard Python generator semantics),
+    so callers can wrap the call in a try/except around iteration to
+    catch request errors the same way as a non-streaming call."""
+    yield from _batch_text_stream(_call_llm_stream_raw(system_prompt, user_message))
 
 
 # Confidence is tied to retrieval quality, not the LLM's own self-assessment
@@ -318,40 +361,100 @@ def _display_confidence(retrieval_confidence: str) -> str:
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
-def generate_answer(
+def stream_answer(
     question: str,
     retrieval: dict[str, Any],
     intent: Intent = UNKNOWN_INTENT,
-    want_customer_wording: bool = False,
-) -> GeneratedAnswer:
-    """Generates the internal answer (and, if requested and enabled, a
-    customer-facing draft) for one question. Returns NO_SOURCE_MESSAGE
-    instead of calling the LLM if retrieval found nothing usable."""
+) -> Iterator[str]:
+    """Yields the internal answer's text in chunks as the LLM generates it
+    -- feed this straight to st.write_stream() (or similar) for live
+    display. Yields NO_SOURCE_MESSAGE once, without calling the LLM at
+    all, if retrieval found nothing usable, or AMBIGUOUS_PRODUCT_MESSAGE
+    once, also without calling the LLM, if the question refers to "this"/
+    "it"/"the sensor" without naming a real product -- a deterministic
+    check, not a prompt instruction, since testing showed the model
+    reliably invents a product to answer about rather than asking which
+    one was meant (retrieval finding topically-similar chunks isn't the
+    same as the user having named a product). Once the caller has the
+    full text (e.g. st.write_stream()'s return value), pass it to
+    finalize_answer() to get sources, confidence, risk, and whether
+    customer-facing wording is available -- that can't be known until the
+    full answer exists."""
     matches = retrieval.get("matches") or []
     retrieval_confidence = retrieval.get("confidence", "none")
 
     if REQUIRE_SOURCES and (not matches or retrieval_confidence == "none"):
-        return _unsupported_answer(question)
+        yield NO_SOURCE_MESSAGE
+        return
 
-    allow_customer_wording = want_customer_wording and ALLOW_CUSTOMER_FACING_OUTPUT
+    if is_ambiguous_product_reference(question):
+        yield AMBIGUOUS_PRODUCT_MESSAGE
+        return
+
     system_prompt = _load_system_prompt()
-    user_message = _build_user_message(question, matches, intent, allow_customer_wording)
+    user_message = _build_user_message(question, matches, intent)
 
     try:
-        raw_reply = _call_llm(system_prompt, user_message)
+        yield from _call_llm_stream(system_prompt, user_message)
     except ResponseGeneratorError:
         raise
     except Exception as e:
         raise ResponseGeneratorError(f"Answer generation failed: {e}") from e
 
-    sections = _parse_llm_response(raw_reply)
-    answer_text = sections.get("short_answer") or raw_reply.strip() or NO_SOURCE_MESSAGE
-    confidence = _display_confidence(retrieval_confidence)
 
-    # Block customer_wording unless the source text itself backs every
-    # restricted term matched -- a confident retrieval can't launder an
-    # answer that goes beyond what the source actually says.
+_EMAIL_RE = re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+")
+
+
+def _contains_ungrounded_email(answer_text: str, source_text: str) -> bool:
+    """True if the answer states an email address that doesn't literally
+    appear anywhere in the retrieved source text. Proven necessary by
+    testing: asked "Can I get a demo unit?", the model answered with a
+    specific, real-looking contact email and phone number attributed to
+    a named product -- reproducibly -- even though neither appeared in
+    the excerpts actually retrieved for that question. Since MNST is a
+    real company, the model can recall genuine contact details from its
+    own general knowledge rather than the given context, which is
+    exactly the kind of claim "answer only from the approved excerpts"
+    is meant to rule out but doesn't reliably on its own (same class of
+    problem as the ambiguous-product-reference check -- a deterministic
+    check on the finished answer, not another prompt instruction)."""
+    for email in _EMAIL_RE.findall(answer_text):
+        if email.lower() not in source_text.lower():
+            return True
+    return False
+
+
+def finalize_answer(question: str, retrieval: dict[str, Any], answer_text: str) -> GeneratedAnswer:
+    """Builds the final GeneratedAnswer -- sources, confidence, risk, and
+    whether customer-facing wording is available -- from a completed
+    answer_text. Call this with whatever stream_answer() produced, once
+    it's fully streamed (or with NO_SOURCE_MESSAGE if retrieval found
+    nothing, same as stream_answer() would have yielded)."""
+    matches = retrieval.get("matches") or []
+    retrieval_confidence = retrieval.get("confidence", "none")
+    answer_text = answer_text.strip() or NO_SOURCE_MESSAGE
     source_text = " ".join(m.get("text", "") for m in matches)
+
+    if _contains_ungrounded_email(answer_text, source_text):
+        answer_text = NO_SOURCE_MESSAGE
+
+    # A "not documented" or "please clarify" answer showing as high
+    # confidence reads as a contradiction to a rep -- confidence below
+    # comes from retrieval similarity, which can be high even when the
+    # model correctly declines to answer (the fact asked about isn't in
+    # the topically-close excerpts it found) or a product reference is
+    # ambiguous (the excerpts are a strong topical match, just not
+    # confirmation of which product was meant). Force it to Low for
+    # either fixed non-answer, so the badge reflects what the rep
+    # actually got: nothing.
+    if answer_text in (NO_SOURCE_MESSAGE, AMBIGUOUS_PRODUCT_MESSAGE):
+        confidence = "Low"
+    else:
+        confidence = _display_confidence(retrieval_confidence)
+
+    # A customer-facing rewrite is blocked unless the source text itself
+    # backs every restricted term matched -- a confident retrieval can't
+    # launder an answer that goes beyond what the source actually says.
     claim_result = check_restricted_claims(question, answer_text, source_text)
 
     return GeneratedAnswer(
@@ -359,12 +462,56 @@ def generate_answer(
         sources=_dedupe_sources(matches),
         confidence=confidence,
         risk=claim_result.category,
-        customer_wording=(
-            _extract_customer_wording(sections)
-            if allow_customer_wording and not claim_result.is_blocked
-            else None
-        ),
+        customer_wording_blocked=claim_result.is_blocked or not ALLOW_CUSTOMER_FACING_OUTPUT,
     )
+
+
+def generate_answer(
+    question: str,
+    retrieval: dict[str, Any],
+    intent: Intent = UNKNOWN_INTENT,
+) -> GeneratedAnswer:
+    """Non-streaming convenience wrapper around stream_answer() +
+    finalize_answer(), for CLI/scripted callers with no UI to stream
+    into. Does not generate customer-facing wording -- call
+    generate_customer_wording() separately, on demand, if that's needed."""
+    answer_text = "".join(stream_answer(question, retrieval, intent))
+    return finalize_answer(question, retrieval, answer_text)
+
+
+def stream_customer_wording(question: str, answer_text: str) -> Iterator[str]:
+    """Streaming counterpart to generate_customer_wording() -- call this
+    only when a rep actually asks for it (check
+    GeneratedAnswer.customer_wording_blocked first; this function doesn't
+    re-check the claims guardrail itself). Once the caller has the full
+    text (e.g. st.write_stream()'s return value), pass it to
+    finalize_customer_wording()."""
+    system_prompt = _load_customer_wording_prompt()
+    user_message = f"Question: {question}\n\nInternal answer:\n{answer_text}"
+
+    try:
+        yield from _call_llm_stream(system_prompt, user_message)
+    except ResponseGeneratorError:
+        raise
+    except Exception as e:
+        raise ResponseGeneratorError(f"Customer-facing wording generation failed: {e}") from e
+
+
+def finalize_customer_wording(raw_text: str) -> Optional[str]:
+    """Cleans up a completed customer-wording stream's full text. Returns
+    None if the model declined to produce one."""
+    text = raw_text.strip()
+    if not text or text.lower().startswith(("not requested", "n/a", "none", "omit")):
+        return None
+    return text
+
+
+def generate_customer_wording(question: str, answer_text: str) -> Optional[str]:
+    """Non-streaming convenience wrapper around stream_customer_wording() +
+    finalize_customer_wording(), for CLI/scripted callers with no UI to
+    stream into."""
+    raw_text = "".join(stream_customer_wording(question, answer_text))
+    return finalize_customer_wording(raw_text)
 
 
 # ---------------------------------------------------------------------------
@@ -381,7 +528,7 @@ if __name__ == "__main__":
     demo_intent = classify_intent(demo_question)
     demo_retrieval = retrieve(demo_question)
 
-    result = generate_answer(demo_question, demo_retrieval, demo_intent, want_customer_wording=True)
+    result = generate_answer(demo_question, demo_retrieval, demo_intent)
 
     print(f"Question: {demo_question}")
     print(f"Intent: {demo_intent}")
@@ -393,7 +540,7 @@ if __name__ == "__main__":
         print(f"  - {name} ({label})")
         if text:
             print(f"      \"{text}\"")
-    if result.customer_wording:
-        print(f"Customer-facing wording: {result.customer_wording}")
+    if result.customer_wording_blocked:
+        print("Customer-facing wording: (blocked)")
     else:
-        print("Customer-facing wording: (blocked or not requested)")
+        print(f"Customer-facing wording: {generate_customer_wording(demo_question, result.answer)}")

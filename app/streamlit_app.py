@@ -24,7 +24,12 @@ from app.admin_page import render_admin_page
 from app.claim_checker import warm_up as warm_up_claim_checker
 from app.discovery_page import render_discovery_page
 from app.feedback_store import record_feedback
-from app.rag_pipeline import answer_question
+from app.rag_pipeline import (
+    finalize_customer_wording_question,
+    finalize_streamed_answer,
+    stream_answer_question,
+    stream_customer_wording_question,
+)
 from app.requirements_page import render_requirements_page
 from app.response_generator import ResponseGeneratorError
 from app.response_generator import warm_up as warm_up_response_generator
@@ -76,15 +81,15 @@ _warm_up_backend()
 # Session state
 # ---------------------------------------------------------------------------
 if "history" not in st.session_state:
-    st.session_state.history = []  # list of dicts: {question, answer, sources, confidence, risk, customer_wording}
+    st.session_state.history = []  # list of dicts: {question, answer, sources, confidence, risk, customer_wording_blocked, customer_wording}
 
 if "admin_authenticated" not in st.session_state:
     st.session_state.admin_authenticated = False
 
 SAMPLE_QUESTIONS = [
-    "Can this be used to monitor hydrogen buildup in a lead-acid battery room?",
+    "Can the FIXaHY H2 LD be used to monitor hydrogen buildup in a lead-acid battery room?",
     "Is the FIXaHY sensor PESO approved for hazardous areas?",
-    "Can I integrate this with our existing SCADA system over RS485 or 4-20mA?",
+    "Can the FIXaHY H2 LD be integrated with our existing SCADA system over RS485 or 4-20mA?",
     "Can AURIGA be deployed in a hazardous area?",
 ]
 
@@ -256,22 +261,87 @@ def render_assistant_page() -> None:
 
 def _ask_and_record(question: str) -> None:
     """Runs one question through the pipeline and appends it to history.
-    Shared by both the classic and enterprise layouts."""
-    with st.spinner("Checking approved documents..."):
+    Shared by both the classic and enterprise layouts. Streams the answer
+    live as it's generated (like ChatGPT) instead of showing a spinner
+    until the full response is ready -- echoes the question first, in
+    each theme's own style, so the live text doesn't appear with no
+    visible prompt above it. Sources/badges/feedback buttons render
+    normally once the completed turn is appended to history and the
+    script reruns. Customer-facing wording is NOT generated here -- it's
+    produced on demand (see _render_customer_wording()) only if a rep
+    actually asks for it, since generating it eagerly on every question
+    roughly doubled how long this step took, for a section most questions
+    never need."""
+    try:
+        with st.spinner("Checking approved documents..."):
+            retrieval, text_stream = stream_answer_question(question)
+    except (RetrieverError, ResponseGeneratorError) as e:
+        st.error(f"Something went wrong answering that question: {e}")
+        return
+
+    if theme.is_enterprise_theme():
+        st.divider()
+        st.markdown(f"**{question}**")
+        answer_wrapper = st.container(border=True)
+    else:
+        with st.chat_message("user"):
+            st.write(question)
+        answer_wrapper = st.chat_message("assistant")
+
+    try:
+        with answer_wrapper:
+            answer_text = st.write_stream(text_stream)
+    except (RetrieverError, ResponseGeneratorError) as e:
+        st.error(f"Something went wrong answering that question: {e}")
+        return
+
+    result = finalize_streamed_answer(question, retrieval, answer_text)
+    st.session_state.history.append({
+        "question": question,
+        "answer": result["answer"],
+        "sources": result["sources"],
+        "confidence": result["confidence"],
+        "risk": result["risk_flag"],
+        "customer_wording_blocked": result["customer_wording_blocked"],
+        "customer_wording": None,
+    })
+    st.rerun()
+
+
+def _render_customer_wording(turn: dict, key_prefix: str) -> None:
+    """Shared by both layouts: shows the blocked caption, a button to
+    generate customer-facing wording on demand, or the generated wording
+    once it exists. Mutates turn["customer_wording"] in place so it's
+    cached in st.session_state.history and not regenerated on every
+    rerun."""
+    if turn["customer_wording_blocked"]:
+        st.caption("Customer-facing wording blocked — escalate for review.")
+        return
+
+    if turn["customer_wording"]:
+        with st.expander("Customer-facing wording", expanded=True):
+            st.write(turn["customer_wording"])
+            copy_button(
+                turn["customer_wording"],
+                "Copy customer wording",
+                key=f"{key_prefix}-cust",
+                icon=theme.is_enterprise_theme(),
+            )
+        return
+
+    if st.button("Generate customer-facing wording", key=f"{key_prefix}-gen-cust"):
         try:
-            result = answer_question(question, want_customer_wording=True)
-        except (RetrieverError, ResponseGeneratorError) as e:
-            st.error(f"Something went wrong answering that question: {e}")
-        else:
-            st.session_state.history.append({
-                "question": question,
-                "answer": result["answer"],
-                "sources": result["sources"],
-                "confidence": result["confidence"],
-                "risk": result["risk_flag"],
-                "customer_wording": result["customer_wording"],
-            })
-            st.rerun()
+            with st.expander("Customer-facing wording", expanded=True):
+                raw_text = st.write_stream(
+                    stream_customer_wording_question(turn["question"], turn["answer"])
+                )
+        except ResponseGeneratorError as e:
+            st.error(f"Something went wrong generating that: {e}")
+            return
+        turn["customer_wording"] = finalize_customer_wording_question(raw_text) or (
+            "Could not generate customer-facing wording -- try again."
+        )
+        st.rerun()
 
 
 def _render_assistant_page_classic() -> None:
@@ -313,12 +383,7 @@ def _render_assistant_page_classic() -> None:
 
             copy_button(turn["answer"], "Copy answer", key=f"ans-{idx}")
 
-            if turn["customer_wording"]:
-                with st.expander("Customer-facing wording"):
-                    st.write(turn["customer_wording"])
-                    copy_button(turn["customer_wording"], "Copy customer wording", key=f"cust-{idx}")
-            else:
-                st.caption("Customer-facing wording blocked — escalate for review.")
+            _render_customer_wording(turn, key_prefix=f"cust-{idx}")
 
             fcol1, fcol2, fcol3 = st.columns(3)
             if fcol1.button("Correct", key=f"ok-{idx}"):
@@ -398,12 +463,7 @@ def _render_assistant_page_enterprise() -> None:
         with acol4:
             copy_button(turn["answer"], "Copy", key=f"ent-ans-{idx}", icon=True)
 
-        if turn["customer_wording"]:
-            with st.expander("Customer-facing wording"):
-                st.write(turn["customer_wording"])
-                copy_button(turn["customer_wording"], "Copy customer wording", key=f"ent-cust-{idx}", icon=True)
-        else:
-            st.caption("Customer-facing wording blocked — escalate for review.")
+        _render_customer_wording(turn, key_prefix=f"ent-cust-{idx}")
 
 
 # ---------------------------------------------------------------------------

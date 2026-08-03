@@ -191,16 +191,24 @@ p, .stMarkdown p, .stCaption, [data-testid="stCaptionContainer"] {{ color: var(-
 [data-testid="stSidebarNavLink"] {{
   border-radius: 8px !important; border-left: 2px solid transparent !important;
   padding-top: 12px !important; padding-bottom: 12px !important;
+  user-select: none !important;
 }}
 [data-testid="stSidebarNavLink"] [data-testid="stIconMaterial"] {{ font-size: 20px !important; }}
 [data-testid="stSidebarNavLink"]:hover, [data-testid="stSidebarNavLink"]:hover * {{
   background: #0d2547 !important; color: #fff !important;
 }}
+/* Background goes on the link AND every descendant (icon, text span),
+   not just the link itself -- otherwise the :hover rule above (which
+   also paints every descendant) can win on the icon/text spans while
+   this rule wins on the outer link, since clicking a nav item makes it
+   the current page while the mouse is still resting on it (hover never
+   actually ends) -- two different backgrounds layered on top of each
+   other read as a separate highlighted box around just the text. */
 [data-testid="stSidebarNavLink"][aria-current="page"], [data-testid="stSidebarNavLink"][aria-current="page"] * {{
-  color: #fff !important;
+  color: #fff !important; background: var(--mnst-rail-active-bg) !important;
 }}
 [data-testid="stSidebarNavLink"][aria-current="page"] {{
-  background: var(--mnst-rail-active-bg) !important; border-left: 2px solid #ffffff !important;
+  border-left: 2px solid #ffffff !important;
 }}
 
 /* Knowledge-base status block, pinned to the bottom of the sidebar via
