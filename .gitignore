@@ -3,11 +3,7 @@
 __pycache__/
 .pytest_cache/
 vector_store/
-data/private_docs/
-data/approved_docs/
+data/
 *.log
 *.tmp
 *.temp
-data/chroma_index/
-data/feedback.db
-data/requirements.db
