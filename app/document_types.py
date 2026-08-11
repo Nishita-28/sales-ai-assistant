@@ -23,6 +23,7 @@ USE_CASE_GUIDE = "Use Case Guide"
 TECHNICAL_GUIDE = "Technical Guide"
 HISTORICAL_SALES_RECORD = "Historical Sales Record"
 INTERNAL_SALES_STRATEGY = "Internal Sales Strategy"
+SALES_METHODOLOGY_REFERENCE = "Sales Methodology Reference"
 OTHER = "Other"
 
 ALL_TYPES = [
@@ -31,6 +32,7 @@ ALL_TYPES = [
     TECHNICAL_GUIDE,
     HISTORICAL_SALES_RECORD,
     INTERNAL_SALES_STRATEGY,
+    SALES_METHODOLOGY_REFERENCE,
     OTHER,
 ]
 
@@ -42,7 +44,12 @@ ALL_TYPES = [
 # necessarily unsafe, and building that enforcement is a separate,
 # not-yet-requested decision; for now OTHER behaves like Use Case Guide/
 # Technical Guide (open, but never Product-Registry-eligible).
-MAIN_ASSISTANT_EXCLUDED_TYPES = {INTERNAL_SALES_STRATEGY}
+# Sales Methodology Reference is excluded for the same reason as Internal
+# Sales Strategy -- negotiation tactics and qualification-question
+# scripts are for internal coaching use, not something the main Assistant
+# should ever surface into a rep-facing answer that could get relayed to
+# a customer.
+MAIN_ASSISTANT_EXCLUDED_TYPES = {INTERNAL_SALES_STRATEGY, SALES_METHODOLOGY_REFERENCE}
 
 
 def load_document_types() -> dict[str, str]:

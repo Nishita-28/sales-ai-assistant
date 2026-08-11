@@ -135,6 +135,7 @@ _TYPE_HELP = {
     "Technical Guide": "Vendor-neutral background on how a sensing technology works -- not product- or competitor-specific.",
     "Historical Sales Record": "A log of real past deals -- evidence, never treated as a recommendable product.",
     "Internal Sales Strategy": "MNST's own subjective/dated sales judgment (competitive positioning, objections). Excluded from the main Assistant.",
+    "Sales Methodology Reference": "Qualification frameworks, negotiation tactics, outreach cadences -- internal coaching material. Excluded from the main Assistant.",
     "Other": "Doesn't fit the categories above yet -- fully open for now, revisit and reclassify when you can.",
 }
 
