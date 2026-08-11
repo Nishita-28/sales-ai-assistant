@@ -10,6 +10,8 @@ markdown
 chromadb
 sentence-transformers
 openai
+rapidocr_onnxruntime
+pymupdf
 pydantic
 pytest
 ruff

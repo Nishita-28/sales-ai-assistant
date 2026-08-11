@@ -86,12 +86,10 @@ def render_discovery_page() -> None:
                 if point.evidence:
                     st.caption(point.evidence)
                 for j, q in enumerate(point.questions, start=1):
-                    st.checkbox(q, key=f"dq-asked-{i}-{j}")
                     answers[q] = st.text_input(
-                        "Answer",
+                        q,
                         value=answers.get(q, ""),
                         key=f"dq-ans-{i}-{j}",
-                        label_visibility="collapsed",
                         placeholder="Customer's answer (leave blank if not asked yet)",
                     )
             if not theme.is_enterprise_theme():

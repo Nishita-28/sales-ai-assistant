@@ -325,11 +325,15 @@ def remove_document_from_index(document_name: str) -> None:
 # Top-k search answers "which chunks best match this text", not "enumerate
 # every product" -- with more products than top_k, one always gets dropped
 # arbitrarily. Detected by keyword pattern instead.
+_PRODUCT_OR_CATEGORY_NOUN = r"(?:products?|sensors?|detectors?|devices?|analyzers?|units?)"
 _LIST_ALL_PRODUCTS_PATTERNS = [
-    re.compile(r"\ball\b.{0,15}\bproducts?\b", re.IGNORECASE),
-    re.compile(r"\bwhat\b.{0,10}\bproducts?\b.{0,15}\b(available|offer|have|sell|make)\b", re.IGNORECASE),
-    re.compile(r"\bproducts?\s+(lineup|line-up|catalog|catalogue|range|portfolio)\b", re.IGNORECASE),
-    re.compile(r"\blist\b.{0,10}\bproducts?\b", re.IGNORECASE),
+    re.compile(r"\ball\b.{0,20}\b" + _PRODUCT_OR_CATEGORY_NOUN + r"\b", re.IGNORECASE),
+    re.compile(
+        r"\bwhat\b.{0,10}\b" + _PRODUCT_OR_CATEGORY_NOUN + r"\b.{0,15}\b(available|offer|have|sell|make)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b" + _PRODUCT_OR_CATEGORY_NOUN + r"\s+(lineup|line-up|catalog|catalogue|range|portfolio)\b", re.IGNORECASE),
+    re.compile(r"\blist\b.{0,20}\b" + _PRODUCT_OR_CATEGORY_NOUN + r"\b", re.IGNORECASE),
 ]
 
 
@@ -491,27 +495,250 @@ _AMBIGUOUS_REFERENCE_RE = re.compile(
 )
 
 
+def _brand_root(name: str) -> str:
+    """First token of a product name, used as a coarse proxy for 'brand
+    family' -- e.g. FIXaHY Analyzer Series and FIXaHY H2 LD XX share the
+    root 'fixahy', while VISION H2 LD XX doesn't, even though both
+    mention 'H2 LD'."""
+    tokens = re.findall(r"[a-zA-Z0-9]+", name.lower())
+    return tokens[0] if tokens else name.lower()
+
+
+# Deliberate fact, not inferred from name text -- catalogue product names
+# spell out their category inconsistently (AURIGA says "Leak Detector" in
+# full, FIXaHY/PORTaHY/VISION abbreviate it as "H2 LD"), so word-frequency
+# tricks over the name strings can't reliably recover this. Confirmed
+# against each product's own source document title (e.g. "...PESO Approved
+# Leak Detector Series", "...Vision H2 LD (Leak Detector Series)",
+# "...FIXaHY Analyzer Series..."). Hand-maintained on purpose: adding a
+# product means adding one line here, not tuning a heuristic.
+_PRODUCT_TYPES: dict[str, str] = {
+    "AURIGA PORTABLE H2 LEAK DETECTOR": "leak detector",
+    "FIXaHY Analyzer Series": "analyzer",
+    "FIXaHY H2 LD XX": "leak detector",
+    "FIXaHY-G/P/E-4220MA-RRNNVVII": "leak detector",
+    "PORTaHY SERIES": "leak detector",
+    "VISION H2 LD XX": "leak detector",
+}
+
+
+# How a category can be recognized in a query, mapped to the canonical
+# value used in _PRODUCT_TYPES -- kept separate from that dict so the
+# recognizer can accept a few natural variants (bare "detector", plurals)
+# without those variants needing to be a product's literal stored type.
+_PRODUCT_TYPE_TERMS: dict[str, str] = {
+    "leak detector": "leak detector",
+    "leak detectors": "leak detector",
+    "leak detection": "leak detector",
+    "detector": "leak detector",
+    "detectors": "leak detector",
+    "analyzer": "analyzer",
+    "analyzers": "analyzer",
+}
+
+
+def _product_type_ambiguous(query: str, product_names: list[str]) -> bool:
+    """True if the query names a product CATEGORY (e.g. "leak detector")
+    that 2+ currently-indexed products share, without the query naming a
+    specific product or brand distinctly enough to narrow to one of them.
+    This is the fix for e.g. "the leak detector" resolving to AURIGA
+    purely because AURIGA's name happens to spell that phrase out in full
+    while FIXaHY/PORTaHY/VISION abbreviate it as "H2 LD" -- a naming
+    accident, not a real distinguishing feature. Only fires for category
+    terms actually present in _PRODUCT_TYPES, so it can't drift as new,
+    unrelated vocabulary gets used in queries."""
+    query_lower = query.lower()
+    query_words = set(re.findall(r"[a-zA-Z0-9]+", query_lower))
+    types_present = {canonical for term, canonical in _PRODUCT_TYPE_TERMS.items() if term in query_lower}
+    if not types_present:
+        return False
+
+    all_tokens = _product_name_tokens(product_names)
+    for product_type in types_present:
+        matching = [name for name in product_names if _PRODUCT_TYPES.get(name) == product_type]
+        if len(matching) < 2:
+            continue
+
+        # One of the matching products named completely -- not ambiguous.
+        if any(all_tokens[name] and all_tokens[name] <= query_words for name in matching):
+            continue
+
+        # A brand was named that narrows to exactly one matching product.
+        brands = {_brand_root(name) for name in matching}
+        named_brands = brands & query_words
+        if len(named_brands) == 1:
+            within = [n for n in matching if _brand_root(n) == next(iter(named_brands))]
+            if len(within) == 1:
+                continue
+
+        return True
+    return False
+
+
+def _cross_brand_ambiguous(query: str, product_names: list[str]) -> bool:
+    """True if the query's words span 2+ DIFFERENT brand families (not
+    variants of the same one) without the query naming any single
+    product completely or naming at least one brand directly. Catches
+    e.g. "size of H2 LD" -- "H2" and "LD" are too short/generic to
+    register as distinctive or shared tokens for retrieval-scoping
+    purposes (see _distinctive_product_tokens / _shared_family_tokens),
+    but the phrase still genuinely spans multiple, materially different
+    products (e.g. FIXaHY H2 LD XX, a fixed unit, vs. VISION H2 LD XX) --
+    unlike "the FIXaHY sensor", which spans only variants of one brand,
+    or "FIXaHY vs PORTaHY", which names both brands directly on purpose."""
+    query_words = set(re.findall(r"[a-zA-Z0-9]+", query.lower()))
+    all_tokens = _product_name_tokens(product_names)
+
+    # A product counts as fully named if every one of its tokens appears
+    # in the query -- short/generic tokens can still pin down one exact
+    # product when combined (e.g. "FIXaHY H2 LD XX" needs all four
+    # together, no single one of which is distinctive alone).
+    if any(tokens and tokens <= query_words for tokens in all_tokens.values()):
+        return False
+
+    matched_products = {name for name, tokens in all_tokens.items() if tokens & query_words}
+    matched_brands = {_brand_root(name) for name in matched_products}
+    if len(matched_brands) < 2:
+        return False
+
+    brand_roots = {_brand_root(name) for name in product_names}
+    directly_named_brands = brand_roots & query_words
+    if len(directly_named_brands) >= 2:
+        return False  # explicit multi-brand comparison, e.g. "FIXaHY vs PORTaHY"
+
+    if len(directly_named_brands) == 1:
+        # A brand was named directly -- the cross-brand overlap above is
+        # just incidental (other brands happening to share a generic
+        # term). Check whether the query's tokens narrow to one clear
+        # variant within the NAMED brand specifically, e.g. "FIXaHY H2
+        # LD" (missing "XX") still matches FIXaHY H2 LD XX on 3 of its 4
+        # tokens, versus just 1 (the bare brand name) for FIXaHY Analyzer
+        # Series or FIXaHY-4220MA-RRNNVVII.
+        named_brand = next(iter(directly_named_brands))
+        overlaps = {
+            name: len(all_tokens[name] & query_words)
+            for name in product_names
+            if _brand_root(name) == named_brand
+        }
+        max_overlap = max(overlaps.values())
+        best = [name for name, count in overlaps.items() if count == max_overlap]
+        if len(best) == 1 and max_overlap > 1:
+            return False  # a clear single best match within the named brand
+
+    return True
+
+
 def is_ambiguous_product_reference(query: str) -> bool:
     """True if the query refers to a product generically ("this", "it",
-    "the sensor"...) without naming a real one. Retrieval can't resolve
-    that kind of reference on its own -- a topical/keyword match only
-    means some excerpt discusses the same feature asked about, not that
-    it's confirmed to be the product the user has in mind, so callers
-    should ask for clarification instead of treating retrieved matches as
-    an answer. A shared family prefix (e.g. "the FIXaHY sensor") still
-    counts as naming something real, even though it doesn't narrow to one
-    specific variant -- broad is not the same as empty."""
-    if not _AMBIGUOUS_REFERENCE_RE.search(query):
+    "the sensor"...) without naming a real one, OR spans multiple
+    different product families via generic shared terms without naming
+    any of them directly (see _cross_brand_ambiguous). Retrieval can't
+    resolve either kind of reference on its own -- a topical/keyword
+    match only means some excerpt discusses the same feature asked
+    about, not that it's confirmed to be the product the user has in
+    mind, so callers should ask for clarification instead of treating
+    retrieved matches as an answer. A shared family prefix (e.g. "the
+    FIXaHY sensor") still counts as naming something real, even though
+    it doesn't narrow to one specific variant -- broad is not the same
+    as empty. A "list all X" style query (see _is_list_all_products_query)
+    is a different intent entirely -- deliberately asking for every
+    matching product, not confused about which single one -- so it's
+    never treated as ambiguous even when its wording spans multiple
+    brands (e.g. "list all fixed H2 detectors"). A category term shared
+    by multiple products (see _product_type_ambiguous) is also ambiguous
+    even when it happens to be one product's literal name text (e.g.
+    "the leak detector" naming AURIGA only by naming-convention accident,
+    when 5 of 6 products are actually leak detectors)."""
+    if _is_list_all_products_query(query):
         return False
     collection = get_collection()
     if collection.count() == 0:
         return False
     product_names = _product_names_for_scoping(collection)
+
+    if _cross_brand_ambiguous(query, product_names):
+        return True
+    if _product_type_ambiguous(query, product_names):
+        return True
+
+    if not _AMBIGUOUS_REFERENCE_RE.search(query):
+        return False
     if _detect_mentioned_products(query, product_names):
         return False
     query_words = set(re.findall(r"[a-zA-Z0-9]+", query.lower()))
     shared = _shared_family_tokens(product_names)
     return not any(tok in query_words for tok in shared)
+
+
+_SELF_REFERENTIAL_RE = re.compile(
+    r"\b(our|ours|we|we're|we are|us|the company)\b",
+    re.IGNORECASE,
+)
+
+
+def is_self_referential_without_own_products(
+    query: str, matches: list[dict[str, Any]]
+) -> bool:
+    """True if the query asks about "our"/"we"/"us"/"the company" (this
+    company's own products, positioning, capabilities, offerings...) but
+    every retrieved match comes from a reference document (competitor
+    comparison, historical sales log, etc. -- see
+    _is_single_product_document) rather than an actual product
+    catalogue. Proven necessary by testing: asked "What is our hydrogen
+    detection positioning?", retrieval returned 11/11 chunks from the
+    competitor-comparison document and zero from any real product
+    catalogue, and the model answered by describing a named competitor's
+    (MSA) products as this company's own -- a prompt instruction telling
+    it not to do this was tried first and reproducibly failed to
+    prevent it (same class of problem as the ambiguous-product-reference
+    and ungrounded-email checks: an attribution error, not a wording
+    problem, so it needs a deterministic check on what was actually
+    retrieved rather than another prompt instruction)."""
+    if not _SELF_REFERENTIAL_RE.search(query):
+        return False
+    if not matches:
+        return False
+    return not any(
+        _is_single_product_document(m["metadata"].get("document_name", ""))
+        for m in matches
+    )
+
+
+def _interleave_balanced_matches(
+    matches: list[dict[str, Any]], product_names: list[str]
+) -> list[dict[str, Any]]:
+    """Reassembles a flat match list into round-robin order across
+    product_names -- best-of-product-1, best-of-product-2, ..., then
+    second-best-of-product-1, etc. -- instead of one contiguous block per
+    product (which still buries every product but the first behind a
+    wall of one product's content) or a plain similarity sort (which
+    silently re-introduces the exact per-product domination
+    _retrieve_balanced_across_products exists to prevent). Confirmed by
+    testing: for "auriga vs fixahy", keyword-boost added 3 more chunks to
+    AURIGA specifically (already the highest-scoring product), and a
+    subsequent global sort pushed 2 of the 4 compared products' chunks to
+    position 17+ of a 43-chunk context -- the LLM then only discussed the
+    2 products it saw first."""
+    by_product: dict[str, list[dict[str, Any]]] = {}
+    for m in matches:
+        by_product.setdefault(m["metadata"].get("product_name"), []).append(m)
+    for group in by_product.values():
+        group.sort(key=lambda m: m["similarity"], reverse=True)
+
+    ordered_keys = list(product_names) + [k for k in by_product if k not in product_names]
+    interleaved: list[dict[str, Any]] = []
+    index = 0
+    while True:
+        added_any = False
+        for name in ordered_keys:
+            group = by_product.get(name, [])
+            if index < len(group):
+                interleaved.append(group[index])
+                added_any = True
+        if not added_any:
+            break
+        index += 1
+    return interleaved
 
 
 def _retrieve_balanced_across_products(
@@ -617,7 +844,10 @@ def _merge_where(where: Optional[dict], extra: Optional[dict]) -> Optional[dict]
 # Retrieval
 # ---------------------------------------------------------------------------
 def retrieve(
-    query: str, top_k: int = 8, exclude_document_names: Optional[set[str]] = None
+    query: str,
+    top_k: int = 8,
+    exclude_document_names: Optional[set[str]] = None,
+    scope_to_products: bool = True,
 ) -> dict[str, Any]:
     """Retrieves the top_k most relevant chunks for a question, plus any
     keyword-matched chunks the vector search missed (see
@@ -629,7 +859,16 @@ def retrieve(
     history spreadsheet from product recommendations), filtering after
     the fact isn't enough: proven by testing, a dominant non-product
     document can occupy the entire top-k regardless of how wide it's
-    fetched, leaving nothing real behind after post-hoc filtering."""
+    fetched, leaving nothing real behind after post-hoc filtering.
+
+    scope_to_products=False skips narrowing to a single detected product
+    entirely -- for callers that need breadth across multiple MNST
+    products AND non-product documents (e.g. a competitor comparison) in
+    the same call, like sales_aid_generator.py. Confirmed by testing: a
+    comparison query naming both a use case and a competitor technology
+    can still match one MNST product's distinctive tokens, which then
+    silently scopes the ENTIRE top_k to that one product's chunks and
+    excludes the competitor-comparison document completely."""
     collection = get_collection()
 
     try:
@@ -652,7 +891,7 @@ def retrieve(
         except Exception as e:
             raise RetrieverError(f"Vector search failed: {e}") from e
     else:
-        mentioned = _mentioned_products_for_query(query, collection)
+        mentioned = _mentioned_products_for_query(query, collection) if scope_to_products else []
 
         if len(mentioned) == 1:
             boost_where = {"product_name": mentioned[0]}
@@ -686,6 +925,18 @@ def retrieve(
         boosted = _keyword_boost_matches(query, query_embedding, collection, existing_texts, where=boost_where)
         if boosted:
             matches.extend(boosted)
+
+        if len(mentioned) >= 2:
+            # Always interleave here, whether or not boosting added
+            # anything -- _retrieve_balanced_across_products' own output
+            # is already contiguous blocks (all of product A, then all of
+            # product B, ...), which still buries every product but the
+            # first behind a wall of one product's content. A plain
+            # similarity sort would be even worse: it would silently undo
+            # the fairness _retrieve_balanced_across_products just built
+            # (confirmed by testing -- see _interleave_balanced_matches).
+            matches = _interleave_balanced_matches(matches, mentioned)
+        elif boosted:
             matches.sort(key=lambda m: m["similarity"], reverse=True)
 
     # max() not matches[0]: the list-all-products branch orders by document

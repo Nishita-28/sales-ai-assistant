@@ -30,7 +30,7 @@ For each potential Right to Win provide:
 
 2. Supporting Evidence
    - Summarize the relevant information from the retrieved documentation, about an MNST product specifically -- not a competitor's.
-   - Cite the supporting source(s).
+   - Reference the supporting source(s) by document name in plain prose (e.g. "per the FIXaHY H2 LD catalogue"). Never cite sources as bracketed numbers like [1] or [2] -- those numbers are internal labels for this prompt only and are not shown anywhere on the page, so they would be meaningless to the reader.
 
 3. Discovery Questions
    - Generate 2-4 exploratory questions that would confirm whether this documented advantage is important to the customer.

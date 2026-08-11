@@ -83,3 +83,36 @@ def render_sales_aid_page() -> None:
         with st.expander("Drawn from"):
             for name, _ in result.sources:
                 st.markdown(f"- `{name}`")
+
+    st.download_button(
+        "Download sales aid (.txt)",
+        data=_sales_aid_as_text(result),
+        file_name=f"{(result.title or 'sales_aid').strip().replace(' ', '_')}.txt",
+        mime="text/plain",
+    )
+
+
+def _sales_aid_as_text(result) -> str:
+    """Plain-text export of the full sales aid -- readable in Notepad,
+    Word, or pasted straight into an email, without needing a specific
+    file viewer."""
+    parts = [result.title or "Sales Aid", "=" * len(result.title or "Sales Aid"), ""]
+    if result.customer_priorities:
+        parts.append("Customer priorities identified:")
+        parts.extend(f"- {p}" for p in result.customer_priorities)
+        parts.append("")
+    if result.use_case_framing:
+        parts.append(result.use_case_framing)
+        parts.append("")
+    if result.comparison:
+        parts.append("Comparison:")
+        parts.extend(result.comparison)
+        parts.append("")
+    if result.customer_summary:
+        parts.append("Customer-ready summary:")
+        parts.append(result.customer_summary)
+        parts.append("")
+    if result.sources:
+        parts.append("Drawn from:")
+        parts.extend(f"- {name}" for name, _ in result.sources)
+    return "\n".join(parts)

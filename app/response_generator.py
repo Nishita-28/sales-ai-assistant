@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 
 from app.claim_checker import check_restricted_claims
 from app.intent import Intent, UNKNOWN_INTENT
-from app.retriever import is_ambiguous_product_reference
+from app.retriever import is_ambiguous_product_reference, is_self_referential_without_own_products
 
 load_dotenv()
 
@@ -375,8 +375,13 @@ def stream_answer(
     check, not a prompt instruction, since testing showed the model
     reliably invents a product to answer about rather than asking which
     one was meant (retrieval finding topically-similar chunks isn't the
-    same as the user having named a product). Once the caller has the
-    full text (e.g. st.write_stream()'s return value), pass it to
+    same as the user having named a product), or NO_SOURCE_MESSAGE again
+    if the question is self-referential ("our"/"we"/"us"/"the company")
+    but every retrieved match came from a reference document rather than
+    an actual product catalogue -- retrieving topically-related
+    competitor content isn't the same as having this company's own
+    answer. Once the caller has the full text (e.g. st.write_stream()'s
+    return value), pass it to
     finalize_answer() to get sources, confidence, risk, and whether
     customer-facing wording is available -- that can't be known until the
     full answer exists."""
@@ -389,6 +394,10 @@ def stream_answer(
 
     if is_ambiguous_product_reference(question):
         yield AMBIGUOUS_PRODUCT_MESSAGE
+        return
+
+    if is_self_referential_without_own_products(question, matches):
+        yield NO_SOURCE_MESSAGE
         return
 
     system_prompt = _load_system_prompt()

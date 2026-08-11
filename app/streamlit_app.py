@@ -399,6 +399,8 @@ def _render_assistant_page_classic() -> None:
     question = st.chat_input("Ask a sales or application question")
     if "pending_question" in st.session_state:
         question = st.session_state.pop("pending_question")
+    if question:
+        question = question.strip()
 
     if question:
         _ask_and_record(question)
@@ -434,6 +436,8 @@ def _render_assistant_page_enterprise() -> None:
     if "pending_question" in st.session_state:
         question = st.session_state.pop("pending_question")
         asked = True
+    if question:
+        question = question.strip()
 
     if asked and question:
         _ask_and_record(question)

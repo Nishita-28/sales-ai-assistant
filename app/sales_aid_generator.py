@@ -110,14 +110,28 @@ def stream_sales_aid(
     what streams live is that raw text, not the final rendered
     layout -- the properly parsed sections render once finalize_ runs,
     same pattern as the Assistant page's streamed answer."""
-    from app.retriever import retrieve
+    from app.retriever import all_document_names, retrieve
 
     query = use_case_description
     if compare_against.strip():
         query = f"{use_case_description} compared to {compare_against.strip()}"
 
-    retrieval = retrieve(query, top_k=top_k)
-    matches = retrieval.get("matches") or []
+    # A single unscoped retrieve() lets one side's ranking dominate the whole
+    # top_k -- confirmed by testing: a query naming a competitor technology
+    # pulled almost entirely from the competitor-comparison document, leaving
+    # 1-2 MNST chunks, and vice versa when the query leaned MNST. A real
+    # comparison needs guaranteed room for both sides, so retrieve them
+    # separately (each excluding the other's documents) and merge, the same
+    # split-retrieval fix already proven for discovery_generator.py's
+    # spreadsheet-crowding bug.
+    all_names = all_document_names()
+    competitor_docs = {n for n in all_names if "competitor" in n.lower() or "comparison" in n.lower()}
+    mnst_docs = set(all_names) - competitor_docs
+
+    half = max(top_k // 2, 4)
+    mnst_retrieval = retrieve(query, top_k=half, exclude_document_names=competitor_docs, scope_to_products=False)
+    competitor_retrieval = retrieve(query, top_k=half, exclude_document_names=mnst_docs, scope_to_products=False)
+    matches = (mnst_retrieval.get("matches") or []) + (competitor_retrieval.get("matches") or [])
 
     compare_line = (
         f"Compare specifically against: {compare_against.strip()}"
