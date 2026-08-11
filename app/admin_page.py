@@ -31,6 +31,7 @@ from app.feedback_store import (
     resolve_feedback,
 )
 from app.registry_builder import rebuild_product_registry
+from app.requirements_fields import FIELD_TYPES, load_fields, merge_core_fields, save_fields, unique_key
 from app.requirements_store import delete_requirement, list_requirements
 from app.restricted_policy import KNOWN_CATEGORIES, PolicyEntry, load_entries, save_entries
 from app.retriever import (
@@ -228,6 +229,17 @@ def _render_approved_claims_tab() -> None:
         st.success("Saved Approved Claims.")
         st.rerun()
 
+    if bullets:
+        st.divider()
+        col1, col2 = st.columns([4, 1])
+        to_delete = col1.selectbox(
+            "Remove a claim", bullets, key="delete-approved-claim-select", label_visibility="collapsed"
+        )
+        if col2.button("Delete", key="delete-approved-claim-btn", use_container_width=True):
+            save_claims(APPROVED_CLAIMS_PATH, header, [b for b in bullets if b != to_delete])
+            st.success(f"Removed: {to_delete}")
+            st.rerun()
+
 
 # ---------------------------------------------------------------------------
 # Restricted Claims tab -- this is what the assistant actually enforces, so
@@ -287,6 +299,28 @@ def _render_restricted_claims_tab() -> None:
         save_entries(RESTRICTED_CLAIMS_PATH, _rows_to_entries(edited))
         st.success("Saved Restricted Claims. Enforcement updated immediately.")
         st.rerun()
+
+    if entries:
+        st.divider()
+
+        def _entry_label(i: int) -> str:
+            e = entries[i]
+            keywords = ", ".join(e.keywords[:3]) + ("..." if len(e.keywords) > 3 else "")
+            return f"{e.category} -- {keywords}"
+
+        col1, col2 = st.columns([4, 1])
+        idx = col1.selectbox(
+            "Remove an entry",
+            range(len(entries)),
+            format_func=_entry_label,
+            key="delete-restricted-select",
+            label_visibility="collapsed",
+        )
+        if col2.button("Delete", key="delete-restricted-btn", use_container_width=True):
+            remaining = [e for i, e in enumerate(entries) if i != idx]
+            save_entries(RESTRICTED_CLAIMS_PATH, remaining)
+            st.success(f"Removed: {_entry_label(idx)}")
+            st.rerun()
 
 
 # ---------------------------------------------------------------------------
@@ -497,7 +531,7 @@ def _confirm_delete_requirement_dialog(requirement_id: int, customer_name: str, 
         st.rerun()
 
 
-def _render_requirements_admin_tab() -> None:
+def _render_requirements_records_tab() -> None:
     rows = list_requirements()
     if not rows:
         st.caption("No customer requirements captured yet.")
@@ -512,6 +546,106 @@ def _render_requirements_admin_tab() -> None:
             st.caption(f"{row['application'] or 'No application noted'} | {row['install_type']} | {area}")
             if st.button("Delete", key=f"delete-req-{row['id']}", use_container_width=True):
                 _confirm_delete_requirement_dialog(row["id"], row["customer_name"], row["company"])
+
+
+def _render_requirements_form_fields_tab() -> None:
+    st.caption(
+        "Edit the Customer Requirements page's generic questions -- label, options, whether it's "
+        "required, and whether it's shown at all. Changes take effect immediately, no restart needed. "
+        "Built-in fields (Customer Name, Company, Certifications, etc.) can be renamed, relabeled, or "
+        "hidden, but not deleted outright -- they're tied to real stored data or logic elsewhere "
+        "(Customer Name and Company specifically are always required and always shown, regardless of "
+        "the Visible checkbox). Add a new row for a brand-new field; leave its Key blank, it's "
+        "generated from the Label. Per-product ordering options (Output Signal, Range, Background, "
+        "etc.) aren't edited here -- those come straight from the approved product catalogues."
+    )
+
+    fields = load_fields()
+    df = pd.DataFrame(
+        [
+            {
+                "key": f["key"],
+                "label": f["label"],
+                "type": f.get("type", "text"),
+                "options": ", ".join(f.get("options") or []),
+                "required": bool(f.get("required", False)),
+                "visible": bool(f.get("visible", True)),
+            }
+            for f in fields
+        ]
+    )
+
+    edited = st.data_editor(
+        df,
+        num_rows="dynamic",
+        use_container_width=True,
+        hide_index=True,
+        key="editor-requirements-fields",
+        column_config={
+            "key": st.column_config.TextColumn(
+                help="Auto-generated from the label for a new field -- leave blank.", disabled=True
+            ),
+            "type": st.column_config.SelectboxColumn(options=FIELD_TYPES, required=True),
+            "options": st.column_config.TextColumn(
+                help="Comma-separated -- only used for select / multiselect / radio fields."
+            ),
+            "required": st.column_config.CheckboxColumn(),
+            "visible": st.column_config.CheckboxColumn(
+                help="Unchecked = not shown on the form. A built-in field whose row is deleted here "
+                "is kept and hidden instead of removed."
+            ),
+        },
+    )
+
+    if st.button("Save Form Fields", type="primary"):
+        existing_by_key = {f["key"]: f for f in fields}
+        edited_fields = []
+        seen_keys: set[str] = set()
+        for row in edited.itertuples(index=False):
+            label = str(row.label).strip()
+            if not label:
+                continue
+            key = unique_key(label, str(row.key or ""), seen_keys)
+            seen_keys.add(key)
+            options = [o.strip() for o in str(row.options).split(",") if o.strip()] if row.options else []
+            edited_fields.append(
+                {
+                    "key": key,
+                    "label": label,
+                    "type": row.type,
+                    "options": options,
+                    "required": bool(row.required),
+                    "visible": bool(row.visible),
+                    "core": existing_by_key.get(key, {}).get("core", False),
+                }
+            )
+        save_fields(merge_core_fields(edited_fields))
+        st.success("Saved. The Customer Requirements page reflects this immediately.")
+        st.rerun()
+
+    custom_fields = [f for f in fields if not f.get("core")]
+    if custom_fields:
+        st.divider()
+        col1, col2 = st.columns([4, 1])
+        to_delete = col1.selectbox(
+            "Remove a custom field",
+            [f["key"] for f in custom_fields],
+            format_func=lambda k: next(f["label"] for f in custom_fields if f["key"] == k),
+            key="delete-req-field-select",
+            label_visibility="collapsed",
+        )
+        if col2.button("Delete", key="delete-req-field-btn", use_container_width=True):
+            save_fields([f for f in fields if f["key"] != to_delete])
+            st.success("Removed.")
+            st.rerun()
+
+
+def _render_requirements_admin_tab() -> None:
+    records_tab, fields_tab = st.tabs(["Submitted Requirements", "Form Fields"])
+    with records_tab:
+        _render_requirements_records_tab()
+    with fields_tab:
+        _render_requirements_form_fields_tab()
 
 
 # ---------------------------------------------------------------------------

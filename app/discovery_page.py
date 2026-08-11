@@ -13,9 +13,11 @@ import streamlit as st
 from app import theme
 from app.discovery_generator import (
     MIN_ANSWERS_FOR_RECOMMENDATION,
+    RightToWinPoint,
     finalize_discovery_questions,
     finalize_recommendation,
     insufficient_recommendation,
+    stream_discovery_points,
     stream_discovery_questions,
     stream_recommendation,
 )
@@ -34,6 +36,27 @@ OUTCOME_RENDER = {
 }
 
 
+def _render_right_to_win_card(i: int, point: RightToWinPoint, answers: dict[str, str]) -> None:
+    """One Right-to-Win card -- title, evidence, and one answer-capture
+    box per question. Shared by the live (mid-stream) render and the
+    persisted post-generation render so the two look identical and a
+    typed-ahead answer survives the switch between them (same `answers`
+    dict, same widget key scheme)."""
+    with st.container(border=theme.is_enterprise_theme()):
+        st.markdown(f"**{i}. {point.title}**")
+        if point.evidence:
+            st.caption(point.evidence)
+        for j, q in enumerate(point.questions, start=1):
+            answers[q] = st.text_input(
+                q,
+                value=answers.get(q, ""),
+                key=f"dq-ans-{i}-{j}",
+                placeholder="Customer's answer (leave blank if not asked yet)",
+            )
+    if not theme.is_enterprise_theme():
+        st.markdown("")
+
+
 def render_discovery_page() -> None:
     st.title("Pre-Call Discovery")
     st.caption(
@@ -43,12 +66,24 @@ def render_discovery_page() -> None:
         "request a recommendation once you have enough of them."
     )
 
+    # Ctrl+Enter in a text_area only commits the typed text into the
+    # widget (Streamlit reserves plain Enter for line breaks in a
+    # multi-line box) -- it doesn't click a separate button on its own.
+    # on_change fires on that same commit (Ctrl+Enter, or clicking away),
+    # so wiring it to set this flag makes Ctrl+Enter actually trigger
+    # generation instead of silently doing nothing visible.
+    def _mark_auto_generate() -> None:
+        st.session_state.discovery_auto_generate = True
+
     use_case = st.text_area(
         "Customer use case",
         placeholder=EXAMPLE_USE_CASE,
         height=120,
+        key="discovery_use_case_box",
+        on_change=_mark_auto_generate,
     )
     generate = st.button("Generate discovery questions", type="primary")
+    generate = generate or st.session_state.pop("discovery_auto_generate", False)
 
     if generate:
         if not use_case.strip():
@@ -57,8 +92,26 @@ def render_discovery_page() -> None:
             try:
                 with st.spinner("Checking approved documents..."):
                     matches, text_stream = stream_discovery_questions(use_case)
-                with st.container(border=theme.is_enterprise_theme()):
-                    raw_reply = st.write_stream(text_stream)
+
+                # Renders each Right-to-Win card (title, evidence, answer
+                # boxes) the moment it's actually complete, instead of
+                # making a rep wait for the whole multi-point reply --
+                # only the point still being generated shows as raw
+                # streaming text, in its own box below whatever's already
+                # been rendered as real cards.
+                live_answers: dict[str, str] = {}
+                completed_points: list[RightToWinPoint] = []
+                points_slot = st.container()
+                live_slot = st.empty()
+                raw_reply = ""
+                for new_points, tail_text, raw_reply in stream_discovery_points(text_stream):
+                    for point in new_points:
+                        completed_points.append(point)
+                        with points_slot:
+                            _render_right_to_win_card(len(completed_points), point, live_answers)
+                    with live_slot.container(border=theme.is_enterprise_theme()):
+                        st.markdown(tail_text)
+                live_slot.empty()
             except (RetrieverError, ResponseGeneratorError) as e:
                 st.error(f"Something went wrong generating questions: {e}")
             else:
@@ -81,19 +134,7 @@ def render_discovery_page() -> None:
     else:
         st.markdown("**Potential Right to Win, ranked highest to lowest relevance**")
         for i, point in enumerate(result.right_to_win, start=1):
-            with st.container(border=theme.is_enterprise_theme()):
-                st.markdown(f"**{i}. {point.title}**")
-                if point.evidence:
-                    st.caption(point.evidence)
-                for j, q in enumerate(point.questions, start=1):
-                    answers[q] = st.text_input(
-                        q,
-                        value=answers.get(q, ""),
-                        key=f"dq-ans-{i}-{j}",
-                        placeholder="Customer's answer (leave blank if not asked yet)",
-                    )
-            if not theme.is_enterprise_theme():
-                st.markdown("")
+            _render_right_to_win_card(i, point, answers)
 
     if result.sources:
         with st.expander("Drawn from"):

@@ -4,7 +4,11 @@ to be handed to a customer's technical champion to circulate internally.
 """
 from __future__ import annotations
 
+import io
+import re
+
 import streamlit as st
+from docx import Document
 
 from app import theme
 from app.response_generator import ResponseGeneratorError
@@ -85,34 +89,76 @@ def render_sales_aid_page() -> None:
                 st.markdown(f"- `{name}`")
 
     st.download_button(
-        "Download sales aid (.txt)",
-        data=_sales_aid_as_text(result),
-        file_name=f"{(result.title or 'sales_aid').strip().replace(' ', '_')}.txt",
-        mime="text/plain",
+        "Download sales aid (.docx)",
+        data=_sales_aid_as_docx(result),
+        file_name=f"{(result.title or 'sales_aid').strip().replace(' ', '_')}.docx",
+        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     )
 
 
-def _sales_aid_as_text(result) -> str:
-    """Plain-text export of the full sales aid -- readable in Notepad,
-    Word, or pasted straight into an email, without needing a specific
-    file viewer."""
-    parts = [result.title or "Sales Aid", "=" * len(result.title or "Sales Aid"), ""]
+_TABLE_SEPARATOR_RE = re.compile(r":?-+:?")
+
+
+def _parse_markdown_table(lines: list[str]) -> list[list[str]]:
+    """result.comparison is the raw markdown table the LLM produced
+    (header, separator, data rows, pipe-delimited) -- this turns it back
+    into plain rows of cell text, dropping the "|---|---|" separator row,
+    so it can be rebuilt as a real docx table instead of exported as
+    literal pipe characters (which is what made the old .txt download's
+    table unreadable in Notepad/Word)."""
+    rows = []
+    for line in lines:
+        line = line.strip()
+        if not line.startswith("|"):
+            continue
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        if all(_TABLE_SEPARATOR_RE.fullmatch(c) for c in cells):
+            continue
+        rows.append(cells)
+    return rows
+
+
+def _sales_aid_as_docx(result) -> bytes:
+    """Word export of the full sales aid -- a real docx table for the
+    comparison (correct alignment in Word/Google Docs/Outlook, unlike a
+    plain-text export of markdown pipe syntax), matching the page's own
+    stated purpose: something to hand to a customer's technical champion
+    to circulate internally."""
+    doc = Document()
+    doc.add_heading(result.title or "Sales Aid", level=1)
+
     if result.customer_priorities:
-        parts.append("Customer priorities identified:")
-        parts.extend(f"- {p}" for p in result.customer_priorities)
-        parts.append("")
+        doc.add_heading("Customer priorities identified", level=2)
+        for p in result.customer_priorities:
+            doc.add_paragraph(p, style="List Bullet")
+
     if result.use_case_framing:
-        parts.append(result.use_case_framing)
-        parts.append("")
-    if result.comparison:
-        parts.append("Comparison:")
-        parts.extend(result.comparison)
-        parts.append("")
+        doc.add_paragraph(result.use_case_framing)
+
+    rows = _parse_markdown_table(result.comparison)
+    if rows:
+        doc.add_heading("Comparison", level=2)
+        cols = max(len(r) for r in rows)
+        table = doc.add_table(rows=len(rows), cols=cols)
+        table.style = "Light Grid Accent 1"
+        for r, row_cells in enumerate(rows):
+            for c, text in enumerate(row_cells[:cols]):
+                cell = table.cell(r, c)
+                cell.text = text
+                if r == 0:
+                    for para in cell.paragraphs:
+                        for run in para.runs:
+                            run.bold = True
+
     if result.customer_summary:
-        parts.append("Customer-ready summary:")
-        parts.append(result.customer_summary)
-        parts.append("")
+        doc.add_heading("Customer-ready summary", level=2)
+        doc.add_paragraph(result.customer_summary)
+
     if result.sources:
-        parts.append("Drawn from:")
-        parts.extend(f"- {name}" for name, _ in result.sources)
-    return "\n".join(parts)
+        doc.add_heading("Drawn from", level=2)
+        for name, _ in result.sources:
+            doc.add_paragraph(name, style="List Bullet")
+
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    return buffer.getvalue()

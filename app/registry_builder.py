@@ -247,6 +247,20 @@ def _find_selectable_table(doc: Document, label: str) -> Table | None:
     return None
 
 
+def _find_fixed_value(doc: Document, label: str) -> str | None:
+    """A "<Label>: <value>" sentence anywhere in the document body -- the
+    fixed-spec counterpart to _find_selectable_table's elsewhere-in-the-
+    document lookup. Only matches a paragraph that STARTS with the label
+    (not any sentence merely containing it), so it can't accidentally
+    grab an unrelated mention."""
+    pattern = re.compile(rf"^{re.escape(label)}\s*:\s*(.+)$", re.IGNORECASE)
+    for p in doc.paragraphs:
+        m = pattern.match(p.text.strip())
+        if m and m.group(1).strip():
+            return m.group(1).strip()
+    return None
+
+
 def _extract_nomenclature(doc: Document) -> dict[str, Any]:
     """Anchors on the "Product Ordering Nomenclature"/"...Information"
     heading (consistent across every catalogue checked), then takes
@@ -402,6 +416,27 @@ def _extract_nomenclature(doc: Document) -> dict[str, Any]:
 
             if values:
                 segments[code] = {"label": label, "values": values}
+
+        # A code position left as a bare label string (never converted
+        # above) either has no real value at all -- a pure identity token
+        # like "FIXaHY" -> "Series Name" -- or is a fixed, non-selectable
+        # spec whose actual value sits in a plain sentence elsewhere in
+        # the document, not in the nomenclature table. Proven necessary
+        # by testing: FIXaHY-4220MA's model number has no "*"/placeholder
+        # (its output isn't a customer choice, unlike VISION/FIXaHY H2
+        # LD's "XX*"), so "4220MA" is correctly excluded from `selectable`
+        # -- but the document still states the fixed value in its own
+        # sentence ("Output Signal: 2-wire 4-20mA Analogue Signal and
+        # RS485 Modbus."), which was previously dropped entirely, leaving
+        # the rep with no information at all instead of a real, quotable
+        # fixed spec. Searching by label, not by code, so this applies to
+        # any product with the same shape, not just this one.
+        for code, label in list(segments.items()):
+            if not isinstance(label, str):
+                continue
+            fixed_value = _find_fixed_value(doc, label)
+            if fixed_value:
+                segments[code] = {"label": label, "values": {"*": fixed_value}}
 
     return {"aliases": aliases, "segments": segments}
 

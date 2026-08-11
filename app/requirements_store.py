@@ -39,13 +39,14 @@ def _connect() -> sqlite3.Connection:
             environmental TEXT NOT NULL DEFAULT '',
             probe_length TEXT NOT NULL DEFAULT '',
             suggested_code TEXT NOT NULL DEFAULT '',
-            additional_requirements TEXT NOT NULL DEFAULT ''
+            additional_requirements TEXT NOT NULL DEFAULT '',
+            extra_fields TEXT NOT NULL DEFAULT ''
         )
         """
     )
     # Migrates databases created before these columns existed.
     existing_columns = {row[1] for row in conn.execute("PRAGMA table_info(requirements)")}
-    for column in ("product_family", "suggested_code"):
+    for column in ("product_family", "suggested_code", "extra_fields"):
         if column not in existing_columns:
             conn.execute(f"ALTER TABLE requirements ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
     return conn
@@ -71,8 +72,13 @@ def record_requirement(
     probe_length: str = "",
     suggested_code: str = "",
     additional_requirements: str = "",
+    extra_fields: str = "",
 ) -> int:
-    """Stores one customer requirement submission. Returns the new row id."""
+    """Stores one customer requirement submission. Returns the new row id.
+    extra_fields is a JSON object string ({field_key: answer}) for whatever
+    admin-added custom fields (see app.requirements_fields) existed on the
+    form at submission time -- kept generic here since new custom fields
+    can appear at any time without a schema change."""
     with closing(_connect()) as conn, conn:
         cursor = conn.execute(
             """
@@ -81,15 +87,15 @@ def record_requirement(
                 install_type, num_detectors, comm_protocols, certifications,
                 installation_area, hazard_zone, temp_min, temp_max, target_gas,
                 sensing_range, accuracy, environmental, probe_length, suggested_code,
-                additional_requirements
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                additional_requirements, extra_fields
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 datetime.now().isoformat(timespec="seconds"), customer_name, company,
                 application, product_family, install_type, num_detectors, comm_protocols,
                 certifications, installation_area, hazard_zone, temp_min, temp_max, target_gas,
                 sensing_range, accuracy, environmental, probe_length, suggested_code,
-                additional_requirements,
+                additional_requirements, extra_fields,
             ),
         )
         return cursor.lastrowid

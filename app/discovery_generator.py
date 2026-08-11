@@ -182,6 +182,54 @@ def stream_discovery_questions(
     return matches, _gen()
 
 
+def stream_discovery_points(
+    text_stream: Iterator[str],
+) -> Iterator[tuple[list[RightToWinPoint], str, str]]:
+    """Consumes a raw text_stream chunk by chunk, yielding
+    (newly_completed_points, live_tail_text, full_text_so_far) after each
+    chunk. A point is only ever counted as complete once a further "Right
+    to Win:" title has appeared after its block -- that's what actually
+    proves the block finished, since the model could still be mid-way
+    through writing its last question. live_tail_text is whatever's been
+    generated for the point still in progress (or the raw start of the
+    reply before any title has appeared yet), for showing live streaming
+    text the same way the whole raw reply used to stream.
+
+    Lets a UI render each Right-to-Win card -- including its answer-
+    capture boxes -- as soon as that point is actually done, instead of
+    making a rep wait for the entire multi-point reply before seeing any
+    of them. Proven necessary by testing: a real reply can have 3-4
+    points with 3 questions each, and reading + starting to ask point 1's
+    questions doesn't need to wait on point 4 still being generated.
+
+    The very last point in the reply is never provably complete until the
+    stream itself ends -- callers should parse it via
+    finalize_discovery_questions(matches, full_text_so_far) once the
+    stream is exhausted, same as before."""
+    accumulated = ""
+    known_complete = 0
+    for chunk in text_stream:
+        accumulated += chunk
+        title_matches = list(_RIGHT_TO_WIN_TITLE_RE.finditer(accumulated))
+        complete_count = max(len(title_matches) - 1, 0)
+
+        new_points: list[RightToWinPoint] = []
+        while known_complete < complete_count:
+            start = title_matches[known_complete].end()
+            end = title_matches[known_complete + 1].start()
+            title = title_matches[known_complete].group(1).strip()
+            block = accumulated[start:end]
+
+            sections = _split_block_sections_inline(block, ["Supporting Evidence", "Discovery Questions"])
+            evidence = sections.get("supporting evidence", "").strip()
+            questions = extract_list_items(sections.get("discovery questions", ""))
+            new_points.append(RightToWinPoint(title=title, evidence=evidence, questions=questions))
+            known_complete += 1
+
+        tail_start = title_matches[known_complete].start() if known_complete < len(title_matches) else len(accumulated)
+        yield new_points, accumulated[tail_start:], accumulated
+
+
 def finalize_discovery_questions(matches: list[dict[str, Any]], raw_reply: str) -> DiscoveryResult:
     """Builds the final DiscoveryResult from a completed raw reply -- call
     with whatever stream_discovery_questions() produced, once it's fully
