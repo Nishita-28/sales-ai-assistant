@@ -13,6 +13,7 @@ from typing import Any, Iterator, Optional
 from dotenv import load_dotenv
 
 from app.claim_checker import check_restricted_claims
+from app.concentration import conversion_grounding_note, detect_conversion_request
 from app.intent import Intent, UNKNOWN_INTENT
 from app.retriever import is_ambiguous_product_reference, is_self_referential_without_own_products
 
@@ -109,7 +110,7 @@ def _load_system_prompt() -> str:
             answer_format = ANSWER_FORMAT_PATH.read_text(encoding="utf-8").strip()
         except OSError as e:
             raise ResponseGeneratorError(f"Failed to read prompt file: {e}") from e
-        _system_prompt_cache = f"{base}\n\nRespond using exactly this format:\n\n{answer_format}"
+        _system_prompt_cache = f"{base}\n\nFormatting:\n\n{answer_format}"
     return _system_prompt_cache
 
 
@@ -339,6 +340,37 @@ def _batch_text_stream(chunks: Iterator[str]) -> Iterator[str]:
         yield buffer
 
 
+def _full_catalog_coverage_note(matches: list[dict[str, Any]]) -> Optional[str]:
+    """When retrieval was deliberately balanced across every currently
+    approved product (see dispatcher.py's "no specific product named"
+    fallback -- it forces exactly this), tells the model explicitly which
+    products were checked. Proven necessary by testing: asked "how much
+    time does each device take to charge," retrieval correctly covered
+    all 6 products, but the model found charging-relevant content for
+    only 2 of them and silently said nothing about the other 4 (fixed,
+    wall-powered products with no battery/charging concept at all) --
+    reading as if only those 2 were ever considered, not as a complete,
+    deliberate check that correctly found nothing relevant for the rest."""
+    try:
+        from app.product_index import load_product_index
+        products, _ = load_product_index()
+    except (FileNotFoundError, OSError):
+        return None
+    all_names = {p.product_name for p in products}
+    if len(all_names) < 2:
+        return None
+    matched_names = {m["metadata"].get("product_name") for m in matches if m.get("metadata")}
+    if matched_names != all_names:
+        return None
+    names_list = ", ".join(sorted(all_names))
+    return (
+        f"This search deliberately checked every currently approved product: {names_list}. "
+        "For each one, either state what its documents say about this question, or explicitly "
+        "note that it isn't documented/applicable for that specific product -- never silently "
+        "omit a product from the answer without saying so."
+    )
+
+
 def _call_llm_stream(system_prompt: str, user_message: str) -> Iterator[str]:
     """Streaming counterpart to _call_llm(): yields text in smooth,
     batched pieces as the LLM generates them, instead of returning the
@@ -365,6 +397,7 @@ def stream_answer(
     question: str,
     retrieval: dict[str, Any],
     intent: Intent = UNKNOWN_INTENT,
+    skip_ambiguity_check: bool = False,
 ) -> Iterator[str]:
     """Yields the internal answer's text in chunks as the LLM generates it
     -- feed this straight to st.write_stream() (or similar) for live
@@ -384,7 +417,20 @@ def stream_answer(
     return value), pass it to
     finalize_answer() to get sources, confidence, risk, and whether
     customer-facing wording is available -- that can't be known until the
-    full answer exists."""
+    full answer exists.
+
+    skip_ambiguity_check=True skips is_ambiguous_product_reference() --
+    for a caller (rag_pipeline.py) whose dispatcher already resolved this
+    question's product reference deterministically (kind="scoped"), which
+    this older, independent, weaker check knows nothing about. Proven
+    necessary by testing: asked "what is the warranty of the mEMS
+    device," dispatcher.py correctly resolved "MEMS" to VISION H2 LD XX
+    (the only current MEMS product) and scoped retrieval to just its
+    catalogue -- but this function still re-ran its own ambiguity check
+    on the raw question text regardless, which doesn't know about
+    technology-alias resolution and produced the generic "Could you
+    specify which product?" message anyway, discarding a correct answer
+    dispatch() had already found."""
     matches = retrieval.get("matches") or []
     retrieval_confidence = retrieval.get("confidence", "none")
 
@@ -392,7 +438,7 @@ def stream_answer(
         yield NO_SOURCE_MESSAGE
         return
 
-    if is_ambiguous_product_reference(question):
+    if not skip_ambiguity_check and is_ambiguous_product_reference(question):
         yield AMBIGUOUS_PRODUCT_MESSAGE
         return
 
@@ -402,6 +448,22 @@ def stream_answer(
 
     system_prompt = _load_system_prompt()
     user_message = _build_user_message(question, matches, intent)
+
+    coverage_note = _full_catalog_coverage_note(matches)
+    if coverage_note:
+        user_message += "\n\n" + coverage_note
+
+    # Hydrogen concentration unit conversion is arithmetic, not something to
+    # trust the model with -- proven necessary by testing: asked to convert
+    # 15,000 ppm to %LEL, the model computed 6% / 150% LEL instead of the
+    # correct 1.5% / 37.5% LEL, while stating it with High confidence. The
+    # conversion ratio (100% LEL = 4% H2 v/v = 40,000 ppm) is computed here
+    # in code and handed to the model as a fact to state, not a calculation
+    # to perform.
+    conversion = detect_conversion_request(question)
+    if conversion is not None:
+        concentration, target_unit = conversion
+        user_message += "\n\n" + conversion_grounding_note(concentration, target_unit)
 
     try:
         yield from _call_llm_stream(system_prompt, user_message)
@@ -479,12 +541,13 @@ def generate_answer(
     question: str,
     retrieval: dict[str, Any],
     intent: Intent = UNKNOWN_INTENT,
+    skip_ambiguity_check: bool = False,
 ) -> GeneratedAnswer:
     """Non-streaming convenience wrapper around stream_answer() +
     finalize_answer(), for CLI/scripted callers with no UI to stream
     into. Does not generate customer-facing wording -- call
     generate_customer_wording() separately, on demand, if that's needed."""
-    answer_text = "".join(stream_answer(question, retrieval, intent))
+    answer_text = "".join(stream_answer(question, retrieval, intent, skip_ambiguity_check))
     return finalize_answer(question, retrieval, answer_text)
 
 

@@ -88,7 +88,7 @@ if "admin_authenticated" not in st.session_state:
 
 SAMPLE_QUESTIONS = [
     "Can the FIXaHY H2 LD be used to monitor hydrogen buildup in a lead-acid battery room?",
-    "Is the FIXaHY sensor PESO approved for hazardous areas?",
+    "Is the FIXaHY-4220MA PESO approved for hazardous areas?",
     "Can the FIXaHY H2 LD be integrated with our existing SCADA system over RS485 or 4-20mA?",
     "Can AURIGA be deployed in a hazardous area?",
 ]
@@ -423,7 +423,7 @@ def _render_assistant_page_enterprise() -> None:
     # A plain text_input + separate button doesn't submit on Enter -- Enter
     # just reruns the script without registering a click. st.form does,
     # since Enter inside a form submits it the same as its submit button.
-    with st.form("assistant_ask_form", clear_on_submit=False):
+    with st.form("assistant_ask_form", clear_on_submit=True):
         search_col, ask_col = st.columns([6, 1])
         question = search_col.text_input(
             "Ask a question",

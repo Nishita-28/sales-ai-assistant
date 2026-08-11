@@ -227,16 +227,22 @@ def _parse_recommendation_reply(raw_text: str) -> tuple[list[str], str, str, str
 
 
 def _is_recommendable_product_document(document_name: str) -> bool:
-    """Sales-history/customer-record spreadsheets describe past deals, not
-    a purchasable product -- they're valid supporting evidence in stage 1's
-    Right-to-Win discovery (real deployment history is good social proof),
-    but a spreadsheet must never be named as "the product" to recommend
-    here. Proven necessary by testing: for some use cases, spreadsheet rows
-    dominate the raw vector search (their prose reads a lot like a
-    discovery-call description) and crowd out actual product documents
-    entirely, and no prompt instruction alone reliably stopped the LLM
-    from citing the spreadsheet as if it were a product."""
-    return not document_name.lower().endswith(".xlsx")
+    """Sales-history/customer-record spreadsheets, use-case guides, and
+    other reference documents describe past deals or background
+    knowledge, not a purchasable product -- they're valid supporting
+    evidence in stage 1's Right-to-Win discovery (real deployment history
+    is good social proof), but must never be named as "the product" to
+    recommend here. Proven necessary by testing: for some use cases,
+    spreadsheet rows dominate the raw vector search (their prose reads a
+    lot like a discovery-call description) and crowd out actual product
+    documents entirely, and no prompt instruction alone reliably stopped
+    the LLM from citing the spreadsheet as if it were a product. Driven
+    by the explicit Admin-assigned document type, not a filename/suffix
+    guess -- this now also correctly rules out any reference document
+    (e.g. a technology or use-case guide), not just spreadsheets."""
+    from app.document_types import is_product_catalogue
+
+    return is_product_catalogue(document_name)
 
 
 def _fetch_recommendable_matches(query: str, top_k: int) -> list[dict[str, Any]]:

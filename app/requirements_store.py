@@ -24,6 +24,7 @@ def _connect() -> sqlite3.Connection:
             customer_name TEXT NOT NULL,
             company TEXT NOT NULL,
             application TEXT NOT NULL DEFAULT '',
+            product_family TEXT NOT NULL DEFAULT '',
             install_type TEXT NOT NULL DEFAULT '',
             num_detectors INTEGER NOT NULL DEFAULT 1,
             comm_protocols TEXT NOT NULL DEFAULT '',
@@ -37,10 +38,16 @@ def _connect() -> sqlite3.Connection:
             accuracy TEXT NOT NULL DEFAULT '',
             environmental TEXT NOT NULL DEFAULT '',
             probe_length TEXT NOT NULL DEFAULT '',
+            suggested_code TEXT NOT NULL DEFAULT '',
             additional_requirements TEXT NOT NULL DEFAULT ''
         )
         """
     )
+    # Migrates databases created before these columns existed.
+    existing_columns = {row[1] for row in conn.execute("PRAGMA table_info(requirements)")}
+    for column in ("product_family", "suggested_code"):
+        if column not in existing_columns:
+            conn.execute(f"ALTER TABLE requirements ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
     return conn
 
 
@@ -48,6 +55,7 @@ def record_requirement(
     customer_name: str,
     company: str,
     application: str = "",
+    product_family: str = "",
     install_type: str = "",
     num_detectors: int = 1,
     comm_protocols: str = "",
@@ -61,6 +69,7 @@ def record_requirement(
     accuracy: str = "",
     environmental: str = "",
     probe_length: str = "",
+    suggested_code: str = "",
     additional_requirements: str = "",
 ) -> int:
     """Stores one customer requirement submission. Returns the new row id."""
@@ -68,17 +77,19 @@ def record_requirement(
         cursor = conn.execute(
             """
             INSERT INTO requirements (
-                created_at, customer_name, company, application, install_type,
-                num_detectors, comm_protocols, certifications, installation_area,
-                hazard_zone, temp_min, temp_max, target_gas, sensing_range,
-                accuracy, environmental, probe_length, additional_requirements
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                created_at, customer_name, company, application, product_family,
+                install_type, num_detectors, comm_protocols, certifications,
+                installation_area, hazard_zone, temp_min, temp_max, target_gas,
+                sensing_range, accuracy, environmental, probe_length, suggested_code,
+                additional_requirements
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 datetime.now().isoformat(timespec="seconds"), customer_name, company,
-                application, install_type, num_detectors, comm_protocols, certifications,
-                installation_area, hazard_zone, temp_min, temp_max, target_gas,
-                sensing_range, accuracy, environmental, probe_length, additional_requirements,
+                application, product_family, install_type, num_detectors, comm_protocols,
+                certifications, installation_area, hazard_zone, temp_min, temp_max, target_gas,
+                sensing_range, accuracy, environmental, probe_length, suggested_code,
+                additional_requirements,
             ),
         )
         return cursor.lastrowid

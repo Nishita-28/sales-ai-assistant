@@ -13,6 +13,12 @@ import streamlit as st
 
 from app import theme
 from app.claims_store import load_claims, save_claims
+from app.document_types import (
+    ALL_TYPES,
+    get_document_type,
+    remove_document_type,
+    set_document_type,
+)
 from app.feedback_store import (
     clear_all_feedback,
     clear_feedback_before,
@@ -24,6 +30,7 @@ from app.feedback_store import (
     recent_reports,
     resolve_feedback,
 )
+from app.registry_builder import rebuild_product_registry
 from app.requirements_store import delete_requirement, list_requirements
 from app.restricted_policy import KNOWN_CATEGORIES, PolicyEntry, load_entries, save_entries
 from app.retriever import (
@@ -85,6 +92,7 @@ def _render_rebuild_status() -> None:
                 try:
                     chunks = load_and_chunk_approved_docs(APPROVED_DOCS_DIR)
                     count = build_index(chunks)
+                    rebuild_product_registry(APPROVED_DOCS_DIR)
                 except RetrieverError as e:
                     st.error(f"Rebuild failed: {e}")
                 else:
@@ -107,8 +115,10 @@ def _confirm_remove_dialog(doc_path: Path) -> None:
     if col1.button("Remove", type="primary", use_container_width=True):
         REMOVED_DOCS_DIR.mkdir(parents=True, exist_ok=True)
         shutil.move(str(doc_path), str(REMOVED_DOCS_DIR / doc_path.name))
+        remove_document_type(doc_path.name)
         try:
             remove_document_from_index(doc_path.name)
+            rebuild_product_registry(APPROVED_DOCS_DIR)
         except RetrieverError as e:
             st.session_state.docs_changed_since_rebuild = True
             st.error(f"Moved the file, but removing it from the index failed: {e}. Use Rebuild Index to retry.")
@@ -116,6 +126,16 @@ def _confirm_remove_dialog(doc_path: Path) -> None:
             st.rerun()
     if col2.button("Cancel", use_container_width=True):
         st.rerun()
+
+
+_TYPE_HELP = {
+    "Product Catalogue": "One specific purchasable product's exact specs and ordering codes. Populates the Product Registry.",
+    "Use Case Guide": "Which industries/applications MNST's products serve -- factual, spans multiple products.",
+    "Technical Guide": "Vendor-neutral background on how a sensing technology works -- not product- or competitor-specific.",
+    "Historical Sales Record": "A log of real past deals -- evidence, never treated as a recommendable product.",
+    "Internal Sales Strategy": "MNST's own subjective/dated sales judgment (competitive positioning, objections). Excluded from the main Assistant.",
+    "Other": "Doesn't fit the categories above yet -- fully open for now, revisit and reclassify when you can.",
+}
 
 
 def _render_documents_tab() -> None:
@@ -132,18 +152,23 @@ def _render_documents_tab() -> None:
                 f"'{uploaded_file.name}' already exists in the knowledge base. "
                 "Remove the existing file first to replace it."
             )
-        elif st.button("Add to knowledge base", type="primary"):
-            APPROVED_DOCS_DIR.mkdir(parents=True, exist_ok=True)
-            target_path.write_bytes(uploaded_file.getbuffer())
-            with st.spinner("Indexing new document..."):
-                try:
-                    count = add_document_to_index(target_path)
-                except RetrieverError as e:
-                    st.session_state.docs_changed_since_rebuild = True
-                    st.error(f"Added the file, but indexing failed: {e}. Use Rebuild Index to retry.")
-                else:
-                    st.success(f"Added and indexed {uploaded_file.name} ({count} chunks).")
-                    st.rerun()
+        else:
+            doc_type = st.selectbox("Document type", ALL_TYPES, key="new-doc-type")
+            st.caption(_TYPE_HELP[doc_type])
+            if st.button("Add to knowledge base", type="primary"):
+                APPROVED_DOCS_DIR.mkdir(parents=True, exist_ok=True)
+                target_path.write_bytes(uploaded_file.getbuffer())
+                set_document_type(uploaded_file.name, doc_type)
+                with st.spinner("Indexing new document..."):
+                    try:
+                        count = add_document_to_index(target_path)
+                        rebuild_product_registry(APPROVED_DOCS_DIR)
+                    except RetrieverError as e:
+                        st.session_state.docs_changed_since_rebuild = True
+                        st.error(f"Added the file, but indexing failed: {e}. Use Rebuild Index to retry.")
+                    else:
+                        st.success(f"Added and indexed {uploaded_file.name} ({count} chunks) as {doc_type}.")
+                        st.rerun()
 
     st.subheader("Current documents")
     doc_paths = _approved_doc_paths()
@@ -156,13 +181,30 @@ def _render_documents_tab() -> None:
         stat = doc_path.stat()
         size_kb = stat.st_size / 1024
         modified = datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M")
-        col1, col2 = st.columns([5, 1])
+        current_type = get_document_type(doc_path.name)
+        col1, col2, col3 = st.columns([4, 2, 1])
         with col1:
             st.markdown(f"**{doc_path.name}**")
             st.caption(f"{size_kb:.0f} KB · modified {modified}")
         with col2:
+            type_options = ALL_TYPES if current_type is not None else ["(unclassified)"] + ALL_TYPES
+            default_index = type_options.index(current_type) if current_type is not None else 0
+            chosen = st.selectbox(
+                "Type", type_options, index=default_index, key=f"type-{doc_path.name}", label_visibility="collapsed"
+            )
+            if chosen != "(unclassified)" and chosen != current_type:
+                set_document_type(doc_path.name, chosen)
+                st.rerun()
+        with col3:
             if st.button("Remove", key=f"remove-{doc_path.name}", use_container_width=True):
                 _confirm_remove_dialog(doc_path)
+
+    if any(get_document_type(p.name) is None for p in doc_paths):
+        st.warning(
+            "Some documents above have no assigned type yet (likely added before this classification existed, "
+            "or via a script that bypassed this form). They default to open/reference behavior until classified -- "
+            "pick a type for each from the dropdown."
+        )
 
 
 # ---------------------------------------------------------------------------

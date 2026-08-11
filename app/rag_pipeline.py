@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 from typing import Any, Iterator
 
+from app.dispatcher import dispatch
 from app.intent import Intent, classify_intent
 from app.response_generator import (
     finalize_answer,
@@ -18,7 +19,24 @@ from app.response_generator import (
     stream_answer,
     stream_customer_wording,
 )
-from app.retriever import retrieve
+from app.retriever import main_assistant_excluded_document_names, retrieve
+
+
+def _apply_nomenclature_notes(retrieval: dict[str, Any], result) -> dict[str, Any]:
+    """Appends every scoped product's complete ordering-configuration
+    table (see DispatchResult.nomenclature_notes) as high-confidence
+    matches, so generation always has the real, deterministic codes
+    available regardless of whether ordinary semantic retrieval happened
+    to rank that chunk highly for this question's specific wording."""
+    if result is None or not result.nomenclature_notes:
+        return retrieval
+    for note in result.nomenclature_notes:
+        retrieval["matches"].append({
+            "text": note["text"],
+            "similarity": 1.0,
+            "metadata": {"document_name": note["document_name"], "product_name": note["product_name"]},
+        })
+    return retrieval
 
 
 def answer_question(question: str) -> dict[str, Any]:
@@ -27,19 +45,47 @@ def answer_question(question: str) -> dict[str, Any]:
     Non-streaming -- for CLI/scripted use. The UI uses stream_answer_question()
     instead so the answer can display live as it's generated. Does not
     generate customer-facing wording -- call get_customer_wording()
-    separately, on demand, once a rep actually asks for one."""
+    separately, on demand, once a rep actually asks for one.
+
+    Checks the dispatcher first (Points 3-6): a catalog/filter question or
+    a specific nomenclature code gets answered directly from the Product
+    Index, no LLM involved; a single resolved product scopes retrieval to
+    just its own catalogue before generating normally; anything else
+    (including a genuine multi-product comparison) falls through to the
+    original, unscoped flow exactly as before."""
     intent: Intent = classify_intent(question)
-    retrieval = retrieve(question)
-    result = generate_answer(question, retrieval, intent)
+    result = dispatch(question)
+
+    if result is not None and result.kind == "direct":
+        retrieval = result.retrieval
+        generated = finalize_answer(question, retrieval, result.answer_text)
+    else:
+        # main_assistant_excluded_document_names() is merged in
+        # unconditionally, on top of whatever dispatch() decided -- these
+        # internal-strategy documents must never reach the main Assistant
+        # regardless of scoping, since (unlike Sales Aid/Discovery)
+        # nothing here gates a retrieved chunk before it reaches a
+        # rep-visible answer.
+        exclude = (result.exclude_document_names if result is not None else set()) | main_assistant_excluded_document_names()
+        mentioned = result.scoped_product_names if result is not None else None
+        retrieval = retrieve(question, exclude_document_names=exclude, mentioned_products=mentioned)
+        retrieval = _apply_nomenclature_notes(retrieval, result)
+        # dispatch() already resolved the product reference deterministically
+        # for a "scoped" result -- skip response_generator's own, older,
+        # weaker is_ambiguous_product_reference() check, which doesn't know
+        # about technology-alias/typo resolution and would otherwise
+        # override a correct answer with a generic "which product?" message.
+        skip_ambiguity_check = result is not None and result.kind == "scoped"
+        generated = generate_answer(question, retrieval, intent, skip_ambiguity_check)
 
     return {
         "question": question,
         "intent": intent,
-        "answer": result.answer,
-        "sources": result.sources,
-        "confidence": result.confidence,
-        "risk_flag": result.risk,
-        "customer_wording_blocked": result.customer_wording_blocked,
+        "answer": generated.answer,
+        "sources": generated.sources,
+        "confidence": generated.confidence,
+        "risk_flag": generated.risk,
+        "customer_wording_blocked": generated.customer_wording_blocked,
     }
 
 
@@ -48,10 +94,21 @@ def stream_answer_question(question: str) -> tuple[dict[str, Any], Iterator[str]
     -- feed text_stream to something like st.write_stream() for live display,
     then pass retrieval and the full text it returns to finalize_streamed_answer()
     to get the rest of the structured result (sources, confidence, risk,
-    whether customer-facing wording is available)."""
+    whether customer-facing wording is available). Same dispatcher check as
+    answer_question() -- see its docstring."""
     intent: Intent = classify_intent(question)
-    retrieval = retrieve(question)
-    return retrieval, stream_answer(question, retrieval, intent)
+    result = dispatch(question)
+
+    if result is not None and result.kind == "direct":
+        answer_text = result.answer_text
+        return result.retrieval, iter([answer_text])
+
+    exclude = (result.exclude_document_names if result is not None else set()) | main_assistant_excluded_document_names()
+    mentioned = result.scoped_product_names if result is not None else None
+    retrieval = retrieve(question, exclude_document_names=exclude, mentioned_products=mentioned)
+    retrieval = _apply_nomenclature_notes(retrieval, result)
+    skip_ambiguity_check = result is not None and result.kind == "scoped"
+    return retrieval, stream_answer(question, retrieval, intent, skip_ambiguity_check)
 
 
 def finalize_streamed_answer(question: str, retrieval: dict[str, Any], answer_text: str) -> dict[str, Any]:
@@ -88,6 +145,8 @@ def finalize_customer_wording_question(raw_text: str) -> str | None:
 
 # ---------------------------------------------------------------------------
 # CLI: python -m app.rag_pipeline --reindex
+#      python -m app.rag_pipeline --add-doc <path-to-file-already-in-data/approved_docs>
+#      python -m app.rag_pipeline --remove-doc "<document name as indexed>"
 #      python -m app.rag_pipeline "question" [--customer-wording]
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
@@ -95,6 +154,7 @@ if __name__ == "__main__":
         sys.stdout.reconfigure(encoding="utf-8")
 
     if "--reindex" in sys.argv:
+        from app.registry_builder import rebuild_product_registry
         from app.retriever import RetrieverError, build_index, load_and_chunk_approved_docs
 
         docs_dir = Path("data/approved_docs")
@@ -107,6 +167,55 @@ if __name__ == "__main__":
         except RetrieverError as e:
             print(f"Index build failed: {e}", file=sys.stderr)
             raise SystemExit(1)
+        registry_count = rebuild_product_registry(docs_dir)
+        print(f"Rebuilt Product Registry: {registry_count} products.")
+        raise SystemExit(0)
+
+    # --add-doc / --remove-doc are the CLI counterparts of what the Admin
+    # page's Documents tab already does on upload/remove (add_document_to_
+    # index / remove_document_from_index in retriever.py) -- they touch only
+    # the one document's chunks instead of re-embedding the whole corpus via
+    # --reindex. The Product Registry rebuild that follows stays a full
+    # rebuild either way (see rebuild_product_registry's docstring: it's
+    # cheap -- a handful of catalogues, not thousands of chunks -- and needs
+    # to see every catalogue together to keep product-name collision
+    # avoidance consistent), so only the expensive embedding step is skipped.
+    if "--add-doc" in sys.argv:
+        from app.registry_builder import rebuild_product_registry
+        from app.retriever import RetrieverError, add_document_to_index
+
+        idx = sys.argv.index("--add-doc")
+        if idx + 1 >= len(sys.argv):
+            print("Usage: python -m app.rag_pipeline --add-doc <path-to-file-in-data/approved_docs>", file=sys.stderr)
+            raise SystemExit(1)
+        doc_path = Path(sys.argv[idx + 1])
+        try:
+            count = add_document_to_index(doc_path)
+        except RetrieverError as e:
+            print(f"Indexing failed: {e}", file=sys.stderr)
+            raise SystemExit(1)
+        print(f"Indexed {count} chunks from {doc_path.name} (other documents untouched).")
+        registry_count = rebuild_product_registry(doc_path.parent)
+        print(f"Rebuilt Product Registry: {registry_count} products.")
+        raise SystemExit(0)
+
+    if "--remove-doc" in sys.argv:
+        from app.registry_builder import rebuild_product_registry
+        from app.retriever import RetrieverError, remove_document_from_index
+
+        idx = sys.argv.index("--remove-doc")
+        if idx + 1 >= len(sys.argv):
+            print('Usage: python -m app.rag_pipeline --remove-doc "<document name as indexed>"', file=sys.stderr)
+            raise SystemExit(1)
+        doc_name = sys.argv[idx + 1]
+        try:
+            remove_document_from_index(doc_name)
+        except RetrieverError as e:
+            print(f"Removal failed: {e}", file=sys.stderr)
+            raise SystemExit(1)
+        print(f"Removed all chunks for '{doc_name}' from the index (other documents untouched).")
+        registry_count = rebuild_product_registry(Path("data/approved_docs"))
+        print(f"Rebuilt Product Registry: {registry_count} products.")
         raise SystemExit(0)
 
     want_customer_wording = "--customer-wording" in sys.argv

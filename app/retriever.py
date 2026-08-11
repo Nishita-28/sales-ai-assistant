@@ -428,13 +428,37 @@ def _is_single_product_document(document_name: str) -> bool:
     "sensor" against the comparison document's own title; a Discovery
     recommendation query matched "customer"/"use case" against the sales
     log's own title, hard-scoping an entire recommendation to a
-    spreadsheet of past deals and finding nothing. Detected by filename
-    pattern since these documents don't represent one purchasable product
-    the way a catalogue does."""
-    name = document_name.lower()
-    return not (
-        any(kw in name for kw in ("comparison", "competitor")) or name.endswith(".xlsx")
-    )
+    spreadsheet of past deals and finding nothing.
+
+    Driven by the explicit Admin-assigned document type (app.document_types),
+    not filename pattern-matching -- the old filename-keyword heuristic
+    ("eligible unless the name contains comparison/competitor/guide, or
+    ends in .xlsx") silently misclassified two different reference
+    documents as products this session, purely because their filenames
+    didn't happen to contain the magic keyword."""
+    from app.document_types import is_product_catalogue
+
+    return is_product_catalogue(document_name)
+
+
+def main_assistant_excluded_document_names() -> set[str]:
+    """Every currently-indexed document whose Admin-assigned type is
+    excluded from the main Assistant (see
+    app.document_types.MAIN_ASSISTANT_EXCLUDED_TYPES) -- internal sales-
+    strategy documents hold MNST's own subjective judgment (self-scored
+    competitive positioning, per-vertical objections/stakeholder notes)
+    rather than independently verified fact, and are meant to feed sales-
+    prep tools where either a claim-checking guardrail sits between the
+    content and a customer (Sales Aid) or the output stays internal,
+    rep-facing prep (Discovery Questions) -- never the main Assistant,
+    where a retrieved chunk goes straight into a rep-visible answer with
+    no such check. sales_aid_generator.py and discovery_generator.py both
+    call retrieve() directly (not through rag_pipeline.py), so they're
+    unaffected by this; rag_pipeline.py adds this set to every retrieve()
+    call the main Assistant makes."""
+    from app.document_types import is_excluded_from_main_assistant
+
+    return {name for name in all_document_names() if is_excluded_from_main_assistant(name)}
 
 
 def _detect_mentioned_products(query: str, product_names: list[str]) -> list[str]:
@@ -494,6 +518,20 @@ _AMBIGUOUS_REFERENCE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# "the lightest product", "the cheapest sensor", "the most accurate
+# detector" -- grammatically the same shape _AMBIGUOUS_REFERENCE_RE
+# matches ("the [word] product"), but a fundamentally different intent:
+# not confusion about which single, already-existing thing is meant, but
+# a deliberate request to rank/compare across the whole catalog. Proven
+# necessary by testing: "which is the lightest product MNST sells" hit
+# the generic "Could you specify which product?" message, which doesn't
+# even make sense as a response to a question that already covers every
+# product by construction.
+_SUPERLATIVE_RE = re.compile(
+    r"\b(most|least)\s+\w+|\b\w{4,}est\b|\b(better|best|worse|worst)\b",
+    re.IGNORECASE,
+)
+
 
 def _brand_root(name: str) -> str:
     """First token of a product name, used as a coarse proxy for 'brand
@@ -504,26 +542,33 @@ def _brand_root(name: str) -> str:
     return tokens[0] if tokens else name.lower()
 
 
-# Deliberate fact, not inferred from name text -- catalogue product names
-# spell out their category inconsistently (AURIGA says "Leak Detector" in
-# full, FIXaHY/PORTaHY/VISION abbreviate it as "H2 LD"), so word-frequency
-# tricks over the name strings can't reliably recover this. Confirmed
-# against each product's own source document title (e.g. "...PESO Approved
-# Leak Detector Series", "...Vision H2 LD (Leak Detector Series)",
-# "...FIXaHY Analyzer Series..."). Hand-maintained on purpose: adding a
-# product means adding one line here, not tuning a heuristic.
-_PRODUCT_TYPES: dict[str, str] = {
-    "AURIGA PORTABLE H2 LEAK DETECTOR": "leak detector",
-    "FIXaHY Analyzer Series": "analyzer",
-    "FIXaHY H2 LD XX": "leak detector",
-    "FIXaHY-G/P/E-4220MA-RRNNVVII": "leak detector",
-    "PORTaHY SERIES": "leak detector",
-    "VISION H2 LD XX": "leak detector",
-}
+def _product_types_from_registry() -> dict[str, str]:
+    """Product name -> lowercased product_type ("leak detector"/
+    "analyzer"), read from the same auto-extracted Product Index
+    dispatcher.py and registry_builder.py already maintain -- not a
+    second, hand-maintained mapping. Proven necessary by testing: a
+    hand-maintained dict here (see git history) had silently drifted out
+    of sync with the real, auto-extracted product names -- still keyed
+    "AURIGA PORTABLE H2 LEAK DETECTOR" and "PORTaHY SERIES" instead of
+    the actual current names "AURIGA" and "PORTaHY H2 LD XX" -- so a
+    fully-named AURIGA question ("...a portable or a fixed detector?")
+    wasn't recognized as already naming a leak detector, and the
+    "detector" reference got wrongly flagged ambiguous between the two
+    OTHER products this stale dict still recognized. registry_builder's
+    "Leak Detector"/"Analyzer" vocab is lowercased here to match this
+    module's own comparison convention. Falls back to an empty mapping if
+    the registry isn't built yet, same as every other registry-dependent
+    check in this codebase."""
+    try:
+        from app.product_index import load_product_index
+        products, _ = load_product_index()
+    except (FileNotFoundError, OSError):
+        return {}
+    return {p.product_name: p.product_type.lower() for p in products if p.product_type != "Unknown"}
 
 
 # How a category can be recognized in a query, mapped to the canonical
-# value used in _PRODUCT_TYPES -- kept separate from that dict so the
+# value _product_types_from_registry() returns -- kept separate so the
 # recognizer can accept a few natural variants (bare "detector", plurals)
 # without those variants needing to be a product's literal stored type.
 _PRODUCT_TYPE_TERMS: dict[str, str] = {
@@ -545,17 +590,18 @@ def _product_type_ambiguous(query: str, product_names: list[str]) -> bool:
     purely because AURIGA's name happens to spell that phrase out in full
     while FIXaHY/PORTaHY/VISION abbreviate it as "H2 LD" -- a naming
     accident, not a real distinguishing feature. Only fires for category
-    terms actually present in _PRODUCT_TYPES, so it can't drift as new,
-    unrelated vocabulary gets used in queries."""
+    terms actually present in _PRODUCT_TYPE_TERMS, so it can't drift as
+    new, unrelated vocabulary gets used in queries."""
     query_lower = query.lower()
     query_words = set(re.findall(r"[a-zA-Z0-9]+", query_lower))
     types_present = {canonical for term, canonical in _PRODUCT_TYPE_TERMS.items() if term in query_lower}
     if not types_present:
         return False
 
+    product_types = _product_types_from_registry()
     all_tokens = _product_name_tokens(product_names)
     for product_type in types_present:
-        matching = [name for name in product_names if _PRODUCT_TYPES.get(name) == product_type]
+        matching = [name for name in product_names if product_types.get(name) == product_type]
         if len(matching) < 2:
             continue
 
@@ -650,6 +696,8 @@ def is_ambiguous_product_reference(query: str) -> bool:
     "the leak detector" naming AURIGA only by naming-convention accident,
     when 5 of 6 products are actually leak detectors)."""
     if _is_list_all_products_query(query):
+        return False
+    if _SUPERLATIVE_RE.search(query):
         return False
     collection = get_collection()
     if collection.count() == 0:
@@ -848,6 +896,7 @@ def retrieve(
     top_k: int = 8,
     exclude_document_names: Optional[set[str]] = None,
     scope_to_products: bool = True,
+    mentioned_products: Optional[list[str]] = None,
 ) -> dict[str, Any]:
     """Retrieves the top_k most relevant chunks for a question, plus any
     keyword-matched chunks the vector search missed (see
@@ -868,7 +917,18 @@ def retrieve(
     comparison query naming both a use case and a competitor technology
     can still match one MNST product's distinctive tokens, which then
     silently scopes the ENTIRE top_k to that one product's chunks and
-    excludes the competitor-comparison document completely."""
+    excludes the competitor-comparison document completely.
+
+    mentioned_products, when given, is used in place of this function's
+    own _mentioned_products_for_query detection -- for a caller (the
+    dispatcher) that already resolved which products the query names
+    with better information than exact-token matching can (e.g. fuzzy
+    typo tolerance: "porthay" for PORTaHY). Proven necessary by testing:
+    even after dispatcher.py excluded every other product's document,
+    this function's own re-detection still came back with only the one
+    exact-matched product, which then filtered the surviving pool down
+    to just that product's chunks by product_name -- silently undoing
+    the caller's own, more complete answer instead of using it."""
     collection = get_collection()
 
     try:
@@ -885,13 +945,24 @@ def retrieve(
 
     query_embedding = embed_texts([query])
 
-    if _is_list_all_products_query(query):
+    # mentioned_products is None checked first: when the caller (the
+    # dispatcher) has already resolved specific products, that decision
+    # must win over this function's own, older "list every document"
+    # shortcut. Proven necessary by testing: "compare auriga and all
+    # fixahy products" contains "all"/"products", which _is_list_all_
+    # products_query reads as a request to list literally every document
+    # in the whole collection -- silently discarding the dispatcher's
+    # correct 4-product scoping and exclusion entirely.
+    if mentioned_products is None and _is_list_all_products_query(query):
         try:
             matches = _retrieve_one_per_document(query_embedding, collection)
         except Exception as e:
             raise RetrieverError(f"Vector search failed: {e}") from e
     else:
-        mentioned = _mentioned_products_for_query(query, collection) if scope_to_products else []
+        if mentioned_products is not None:
+            mentioned = mentioned_products
+        else:
+            mentioned = _mentioned_products_for_query(query, collection) if scope_to_products else []
 
         if len(mentioned) == 1:
             boost_where = {"product_name": mentioned[0]}
@@ -936,6 +1007,38 @@ def retrieve(
             # the fairness _retrieve_balanced_across_products just built
             # (confirmed by testing -- see _interleave_balanced_matches).
             matches = _interleave_balanced_matches(matches, mentioned)
+
+            # Supplement with a genuinely unscoped pass (respecting only
+            # exclude_where, not the product_name restriction) appended
+            # after the balanced block, never mixed into the interleave
+            # itself. Proven necessary by testing: dispatcher.py forces
+            # mentioned_products to every currently approved product for
+            # a question naming no specific one (e.g. "what industries
+            # use the fixed hydrogen leak detector"), so that a spec
+            # comparison gets fair per-product coverage -- but
+            # _retrieve_balanced_across_products queries strictly by
+            # product_name, which structurally can never surface a
+            # reference document (the Industry Use Case Guide, exactly
+            # what that question needs) since its chunks aren't tagged
+            # with any of those product names at all. This has no effect
+            # when exclude_where already rules reference documents out
+            # (a genuine multi-product comparison, which intentionally
+            # excludes them -- see dispatcher._scoped_result).
+            try:
+                supplement = collection.query(
+                    query_embeddings=query_embedding,
+                    n_results=min(top_k, collection_count),
+                    where=exclude_where,
+                )
+                existing_texts = {m["text"] for m in matches}
+                for text, metadata, distance in zip(
+                    supplement["documents"][0], supplement["metadatas"][0], supplement["distances"][0]
+                ):
+                    if text not in existing_texts:
+                        matches.append({"text": text, "metadata": metadata, "similarity": 1 - distance})
+                        existing_texts.add(text)
+            except Exception:
+                pass  # the balanced, per-product matches already found are enough to proceed on
         elif boosted:
             matches.sort(key=lambda m: m["similarity"], reverse=True)
 

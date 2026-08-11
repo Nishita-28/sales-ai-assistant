@@ -49,34 +49,138 @@ def _document_headings(document: dict[str, Any]) -> list[str]:
     ]
 
 
+# Fallback only, for filenames that don't follow the "Catalogue_<model>
+# (<category>)" convention (see _distinctive_filename_tokens) -- generic
+# words that would otherwise falsely count as a "distinctive" match.
+_GENERIC_FILENAME_WORDS = {
+    "catalogue", "catalog", "series", "leak", "detector", "detectors",
+    "portable", "fixed", "hydrogen", "sensor", "sensors", "peso",
+    "approved", "draft", "mnst", "nc1", "nc2", "nc11", "c1", "of", "the",
+    "multi", "nano", "sense", "in",
+}
+
+
+def _distinctive_filename_tokens(filename: str) -> set[str]:
+    """MNST's catalogue filenames follow a real, consistent convention:
+    "Catalogue_<exact model name> (<generic category descriptor>)" -- e.g.
+    "Catalogue_FIXaHY H2 LD (Leak Detector Series)". The parenthesized
+    part is always the generic descriptor, never the model, so stripping
+    it (rather than maintaining a hand-typed stopword list) gives a
+    precise signal for what actually distinguishes this document. Falls
+    back to a small stopword list for the one filename that doesn't
+    follow this convention (no "Catalogue_" marker, no parentheses)."""
+    name = os.path.splitext(filename)[0]
+    marker = re.search(r"catalogu?e_", name, re.IGNORECASE)
+    if marker:
+        core = name[marker.end():]
+        core = re.sub(r"\([^)]*\)", "", core)  # drop the generic descriptor
+        return set(re.findall(r"[a-zA-Z0-9]+", core.lower()))
+    tokens = set(re.findall(r"[a-zA-Z0-9]+", name.lower()))
+    return {t for t in tokens if t not in _GENERIC_FILENAME_WORDS and len(t) >= 3}
+
+
+def _reorder_headings_by_filename_match(headings: list[str], filename: str) -> list[str]:
+    """A document can contain more than one plausible "heading" -- e.g. a
+    floating text box's caption extracted ahead of the real title purely
+    because of where it's anchored in the file, not because it's what a
+    reader would see first on the page. Proven necessary by testing: one
+    catalogue's header banner text ("PORTABLE H2 LEAK DETECTOR") got
+    extracted before its own title paragraph ("AURIGA"), so plain first-
+    heading order silently assigned the wrong product identity.
+
+    Sorts by how many filename tokens each heading shares, not merely
+    whether it shares any -- proven necessary by testing too: within one
+    product family (e.g. "FIXaHY"), several real headings all contain the
+    shared brand word, including an over-generic series-level banner
+    ("FIXaHY LEAK DETECTOR SERIES"). A boolean any-match can't tell that
+    apart from the actual specific model heading ("FIXaHY H2 LD XX"); an
+    overlap count can, since the specific heading shares every token
+    (brand + target gas + type) while the generic banner only shares the
+    brand. Stable otherwise, so a document with no match at all keeps its
+    original order."""
+    distinctive = _distinctive_filename_tokens(filename)
+    if not distinctive:
+        return headings
+
+    def overlap(heading: str) -> int:
+        heading_tokens = set(re.findall(r"[a-zA-Z0-9]+", heading.lower()))
+        return len(heading_tokens & distinctive)
+
+    scored = sorted(enumerate(headings), key=lambda pair: (-overlap(pair[1]), pair[0]))
+    return [h for _, h in scored] if any(overlap(h) for h in headings) else headings
+
+
+def _is_long_placeholder_blob(token: str) -> bool:
+    """True for a token made entirely of repeated-letter pairs, 4+ chars
+    long -- e.g. "RRNNVVII" (the glued-together "RR* NN VV* II" ordering-
+    code placeholders). Deliberately requires 4+ chars so a short, genuine
+    suffix like "XX" is never touched -- several real product titles end
+    in "XX" as their own printed name (e.g. "FIXaHY H2 LD XX"), not a
+    placeholder Claude is guessing at; only a long blob like this is
+    unambiguously code, never a real word."""
+    token = token.rstrip("*")
+    return (
+        token.isalpha() and len(token) >= 4 and len(token) % 2 == 0
+        and all(token[i] == token[i + 1] for i in range(0, len(token), 2))
+    )
+
+
+def _clean_ordering_code_heading(heading: str) -> str:
+    """A document's own chosen title heading can itself be the ordering-
+    code template, rendered with hyphens instead of the tabs used in the
+    "Product Ordering Nomenclature" section further down -- e.g. the
+    4220MA catalogue's title heading is literally
+    "FIXaHY-G/P/E-4220MA-RRNNVVII", not a human-written product name.
+    Only cleans up when the heading contains an unmistakable code marker
+    (a slash-separated option list like "G/P/E", or a long repeated-
+    letter placeholder blob like "RRNNVVII") -- otherwise returns the
+    heading unchanged, so every other document's real printed title
+    (including ones that end in a short "XX") is left exactly as-is."""
+    tokens = re.split(r"[\s-]+", heading)
+    if not any("/" in t or _is_long_placeholder_blob(t) for t in tokens):
+        return heading
+    kept = [t for t in tokens if "/" not in t and not _is_long_placeholder_blob(t)]
+    return " ".join(kept) if kept else heading
+
+
 def assign_product_name(document: dict[str, Any], other_documents: tuple[dict[str, Any], ...] = ()) -> str:
     """Uses the document's own first heading as its product identity,
-    since catalogues put the product name first. When another document
-    shares the same heading at the same position -- e.g. two model
-    variants under one family name -- walks forward to the first heading
-    that actually differs between them, so the two don't collide onto the
+    since catalogues put the product name first -- after reordering
+    candidates so a heading matching the filename's distinctive brand
+    token wins over one that merely happens to be extracted first (see
+    _reorder_headings_by_filename_match). When another document shares
+    the same heading at the same position -- e.g. two model variants
+    under one family name -- walks forward to the first heading that
+    actually differs between them, so the two don't collide onto the
     same identity. Falls back to the filename when a document has no
     headings at all."""
-    own_headings = _document_headings(document)
-    other_heading_seqs = [_document_headings(d) for d in other_documents]
+    filename = document.get("filename", "unknown")
+    own_headings = _reorder_headings_by_filename_match(_document_headings(document), filename)
+    other_heading_seqs = [
+        _reorder_headings_by_filename_match(_document_headings(d), d.get("filename", "unknown"))
+        for d in other_documents
+    ]
 
     for i, heading in enumerate(own_headings):
         if not any(i < len(seq) and seq[i] == heading for seq in other_heading_seqs):
-            return heading
+            return _clean_ordering_code_heading(heading)
 
     if own_headings:
-        return own_headings[-1]
+        return _clean_ordering_code_heading(own_headings[-1])
     return _document_title(document.get("filename", "unknown"))
 
 
 def assign_product_name_avoiding(document: dict[str, Any], taken_names: set[str]) -> str:
     """Simpler variant for adding one new document to an already-indexed
     corpus, where only the already-assigned product names are available
-    (not the other documents' full heading sequences)."""
-    for heading in _document_headings(document):
+    (not the other documents' full heading sequences). Same filename-match
+    reordering as assign_product_name, for the same reason."""
+    filename = document.get("filename", "unknown")
+    headings = _reorder_headings_by_filename_match(_document_headings(document), filename)
+    for heading in headings:
         if heading not in taken_names:
-            return heading
-    return _document_title(document.get("filename", "unknown"))
+            return _clean_ordering_code_heading(heading)
+    return _document_title(filename)
 
 
 def _assign_product_names(documents: list[dict[str, Any]]) -> dict[str, str]:
