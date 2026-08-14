@@ -54,6 +54,10 @@ def logo_data_uri() -> str:
 # Aids visually consistent instead of each page inventing its own palette.
 _BADGE_COLORS = {
     "good": ("#e8f6ee", "#157a4f"),
+    # Brand blue, not green -- kept distinct from "good" (used elsewhere
+    # for Confidence badges) rather than recoloring that shared kind, so
+    # only the deal-status badges below are affected.
+    "good-blue": ("#edf3fb", "#123c80"),
     "warn": ("#fbf1de", "#96650f"),
     "crit": ("#fbebea", "#ab281f"),
     "neutral": ("#eef0f3", "#5b5f66"),
@@ -86,6 +90,34 @@ def render_badges_html(confidence: str, risk: str) -> str:
     risk_kind = _RISK_KIND.get(risk, "neutral")
     risk_badge = _badge_html(f"Risk: {risk}", risk_kind)
     return f'<div class="mnst-badge-row">{conf_badge}{risk_badge}</div>'
+
+
+_RECOMMENDATION_OUTCOME_KIND = {
+    "Recommend": "good-blue",
+    "Trade-offs": "warn",
+    "Insufficient": "warn",
+}
+
+
+def render_deal_status_badges(
+    recommendation_outcome: str | None, requirements_count: int, sales_aids_count: int
+) -> str:
+    """Returns the HTML for a deal's at-a-glance health row -- pass to
+    st.markdown(..., unsafe_allow_html=True). Lets an admin scanning the
+    Deals tab tell "fully worked" from "nothing linked yet" without
+    expanding every deal's requirement/sales-aid lists one by one."""
+    if recommendation_outcome is None:
+        rec_badge = _badge_html("No recommendation yet", "neutral")
+    else:
+        kind = _RECOMMENDATION_OUTCOME_KIND.get(recommendation_outcome, "neutral")
+        rec_badge = _badge_html(f"Recommendation outcome: {recommendation_outcome}", kind)
+    req_badge = _badge_html(
+        f"Requirements: {requirements_count}", "good-blue" if requirements_count else "neutral"
+    )
+    aid_badge = _badge_html(
+        f"Sales Aids: {sales_aids_count}", "good-blue" if sales_aids_count else "neutral"
+    )
+    return f'<div class="mnst-badge-row">{rec_badge}{req_badge}{aid_badge}</div>'
 
 
 def render_logo_html() -> str:

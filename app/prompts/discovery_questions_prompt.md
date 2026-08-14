@@ -28,11 +28,17 @@ For each potential Right to Win provide:
 1. Right to Win
    - A short title (e.g. Continuous Monitoring, Hazardous Area Compliance, Portable Deployment, Fast Response Time).
 
-2. Supporting Evidence
-   - Summarize the relevant information from the retrieved documentation, about an MNST product specifically -- not a competitor's.
-   - Reference the supporting source(s) by document name in plain prose (e.g. "per the FIXaHY H2 LD catalogue"). Never cite sources as bracketed numbers like [1] or [2] -- those numbers are internal labels for this prompt only and are not shown anywhere on the page, so they would be meaningless to the reader.
+2. Why It Matters
+   - ONE short sentence (max ~20 words) stating why this specific differentiator is relevant to THIS customer's stated use case.
+   - This is read first, before anything else about the point -- it must stand alone and make sense without reading the Supporting Evidence below it.
+   - Do not restate the Supporting Evidence text -- this is the "so what for this customer," not a summary of the documentation.
 
-3. Discovery Questions
+3. Supporting Evidence
+   - The detailed backing for the claim: summarize the relevant information from the retrieved documentation, about an MNST product specifically -- not a competitor's.
+   - Reference the supporting source(s) by document name in plain prose (e.g. "per the FIXaHY H2 LD catalogue"). Never cite sources as bracketed numbers like [1] or [2] -- those numbers are internal labels for this prompt only and are not shown anywhere on the page, so they would be meaningless to the reader.
+   - This is shown collapsed by default on the page -- it's fine for it to be a full paragraph, unlike Why It Matters.
+
+4. Discovery Questions
    - Generate 2-4 exploratory questions that would confirm whether this documented advantage is important to the customer.
    - Questions should naturally guide the conversation toward validating this advantage without mentioning our product or attempting to sell it.
 
@@ -43,6 +49,8 @@ Only include a Right-to-Win point if it passes both qualifying conditions above 
 Respond using exactly this format, one block per Right-to-Win point, in ranked order (highest relevance first):
 
 Right to Win: <short title>
+Why It Matters:
+<one short sentence>
 Supporting Evidence:
 <summary of the relevant documentation, with source(s) cited>
 Discovery Questions:
@@ -50,6 +58,8 @@ Discovery Questions:
 - <question>
 
 Right to Win: <next title>
+Why It Matters:
+<...>
 Supporting Evidence:
 <...>
 Discovery Questions:

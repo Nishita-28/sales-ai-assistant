@@ -22,8 +22,8 @@ PRODUCT_CATALOGUE = "Product Catalogue"
 USE_CASE_GUIDE = "Use Case Guide"
 TECHNICAL_GUIDE = "Technical Guide"
 HISTORICAL_SALES_RECORD = "Historical Sales Record"
-INTERNAL_SALES_STRATEGY = "Internal Sales Strategy"
-SALES_METHODOLOGY_REFERENCE = "Sales Methodology Reference"
+INTERNAL_SALES_STRATEGY = "Competitive & Internal Strategy"
+SALES_METHODOLOGY_REFERENCE = "Golden Frameworks & Sales Tactics"
 OTHER = "Other"
 
 ALL_TYPES = [

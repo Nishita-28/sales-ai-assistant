@@ -9,13 +9,17 @@ app.document_types. Seeded with the form's original hardcoded field set
 (DEFAULT_FIELDS) so first load reproduces exactly today's form.
 
 Every default field is marked "core": True -- it's tied to a real, typed
-column in requirements_store.py (and, for customer_name/company/
-certifications, to real validation/warning logic in requirements_page.py)
-that can't just be dropped. Admin can rename, relabel, edit options for, or
-hide a core field, but not delete it outright -- see
-_merge_core_fields below for why. A custom (non-core) field the admin adds
-has none of that: it can be freely added, edited, or removed, and its
-answers are stored generically (see requirements_page._collect_custom_values).
+column in requirements_store.py (and, for certifications, to real
+validation/warning logic in requirements_page.py) that can't just be
+dropped. Admin can rename, relabel, edit options for, or hide a core
+field, but not delete it outright -- see _merge_core_fields below for
+why. A custom (non-core) field the admin adds has none of that: it can
+be freely added, edited, or removed, and its answers are stored
+generically (see requirements_page._collect_custom_values).
+
+Customer Name/Company are NOT in this list -- they come from the deal
+picker (app.deal_picker) now, the same identity Pre-Call Discovery uses,
+not a form field an admin can relabel or hide.
 """
 from __future__ import annotations
 
@@ -32,8 +36,6 @@ FIELD_TYPES = ["text", "textarea", "number", "select", "multiselect", "radio"]
 # list does not change already-saved data/requirements_fields.json, only
 # what a fresh install (or a field an admin fully deletes) falls back to.
 DEFAULT_FIELDS: list[dict[str, Any]] = [
-    {"key": "customer_name", "label": "Customer Name", "type": "text", "options": [], "required": True, "visible": True, "core": True},
-    {"key": "company", "label": "Company", "type": "text", "options": [], "required": True, "visible": True, "core": True},
     {"key": "industries", "label": "Industry / Use Case", "type": "multiselect", "options": [
         "Oil & Gas", "Power Generation & Transmission", "Petrochemicals", "Fertilizers", "Pharmaceuticals",
         "Chemicals", "Nuclear Research", "Steel", "Battery Rooms", "Automobiles (ICE / FCEV)",

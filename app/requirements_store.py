@@ -40,7 +40,8 @@ def _connect() -> sqlite3.Connection:
             probe_length TEXT NOT NULL DEFAULT '',
             suggested_code TEXT NOT NULL DEFAULT '',
             additional_requirements TEXT NOT NULL DEFAULT '',
-            extra_fields TEXT NOT NULL DEFAULT ''
+            extra_fields TEXT NOT NULL DEFAULT '',
+            deal_id INTEGER
         )
         """
     )
@@ -49,6 +50,12 @@ def _connect() -> sqlite3.Connection:
     for column in ("product_family", "suggested_code", "extra_fields"):
         if column not in existing_columns:
             conn.execute(f"ALTER TABLE requirements ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
+    if "deal_id" not in existing_columns:
+        # Nullable, no default -- unlike the TEXT columns above, this is a
+        # real reference to deals.db (see app.deals_store), not free text.
+        # Null for any requirement submitted before deal-linkage existed,
+        # or for one submitted without an active deal.
+        conn.execute("ALTER TABLE requirements ADD COLUMN deal_id INTEGER")
     return conn
 
 
@@ -73,12 +80,15 @@ def record_requirement(
     suggested_code: str = "",
     additional_requirements: str = "",
     extra_fields: str = "",
+    deal_id: Optional[int] = None,
 ) -> int:
     """Stores one customer requirement submission. Returns the new row id.
     extra_fields is a JSON object string ({field_key: answer}) for whatever
     admin-added custom fields (see app.requirements_fields) existed on the
     form at submission time -- kept generic here since new custom fields
-    can appear at any time without a schema change."""
+    can appear at any time without a schema change. deal_id links this
+    submission to a deals.db record (see app.deals_store) -- None for a
+    requirement captured with no active deal."""
     with closing(_connect()) as conn, conn:
         cursor = conn.execute(
             """
@@ -87,15 +97,15 @@ def record_requirement(
                 install_type, num_detectors, comm_protocols, certifications,
                 installation_area, hazard_zone, temp_min, temp_max, target_gas,
                 sensing_range, accuracy, environmental, probe_length, suggested_code,
-                additional_requirements, extra_fields
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                additional_requirements, extra_fields, deal_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 datetime.now().isoformat(timespec="seconds"), customer_name, company,
                 application, product_family, install_type, num_detectors, comm_protocols,
                 certifications, installation_area, hazard_zone, temp_min, temp_max, target_gas,
                 sensing_range, accuracy, environmental, probe_length, suggested_code,
-                additional_requirements, extra_fields,
+                additional_requirements, extra_fields, deal_id,
             ),
         )
         return cursor.lastrowid
@@ -107,6 +117,19 @@ def list_requirements(limit: int = 200) -> list[sqlite3.Row]:
         conn.row_factory = sqlite3.Row
         return conn.execute(
             "SELECT * FROM requirements ORDER BY created_at DESC LIMIT ?", (limit,)
+        ).fetchall()
+
+
+def list_requirements_for_deal(deal_id: int) -> list[sqlite3.Row]:
+    """Every requirement submission linked to a specific deal, oldest
+    first. The read side of the deal_id column recorded by
+    record_requirement() -- without this, deal_id is written but never
+    consulted anywhere, and a deal can't actually show what's been
+    captured for it."""
+    with closing(_connect()) as conn:
+        conn.row_factory = sqlite3.Row
+        return conn.execute(
+            "SELECT * FROM requirements WHERE deal_id = ? ORDER BY created_at ASC", (deal_id,)
         ).fetchall()
 
 

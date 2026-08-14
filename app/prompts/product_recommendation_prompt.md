@@ -25,8 +25,16 @@ Confirmed Priorities:
 Outcome:
 Recommend / Trade-offs / Insufficient
 
+Recommended Product:
+<If Recommend: the single product's name ONLY, exactly as named in the excerpts -- nothing else, no justification, no extra words.
+If Trade-offs or Insufficient: write "None".>
+
+Candidate Products:
+<If Trade-offs: the 2+ candidate product names ONLY, exactly as named in the excerpts, separated by commas -- nothing else, no justification, no extra words.
+If Recommend or Insufficient: write "None".>
+
 Recommendation:
-<If Recommend: the single product name, and why it matches -- citing the specific documented capability per confirmed priority.
+<If Recommend: why it matches -- citing the specific documented capability per confirmed priority. You may restate the product name here too, as part of the prose.
 If Trade-offs: the candidate products and the real trade-offs between them, no single pick forced.
 If Insufficient: state plainly that no recommendation can be made yet.>
 

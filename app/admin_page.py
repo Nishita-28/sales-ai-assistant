@@ -13,6 +13,7 @@ import streamlit as st
 
 from app import theme
 from app.claims_store import load_claims, save_claims
+from app.deals_store import MEDDPICC_FIELDS, delete_deal, get_recommendation, list_deals, missing_fields
 from app.document_types import (
     ALL_TYPES,
     get_document_type,
@@ -32,7 +33,8 @@ from app.feedback_store import (
 )
 from app.registry_builder import rebuild_product_registry
 from app.requirements_fields import FIELD_TYPES, load_fields, merge_core_fields, save_fields, unique_key
-from app.requirements_store import delete_requirement, list_requirements
+from app.requirements_store import delete_requirement, list_requirements, list_requirements_for_deal
+from app.sales_aid_store import get_result, list_sales_aids_for_deal
 from app.restricted_policy import KNOWN_CATEGORIES, PolicyEntry, load_entries, save_entries
 from app.retriever import (
     RetrieverError,
@@ -134,8 +136,8 @@ _TYPE_HELP = {
     "Use Case Guide": "Which industries/applications MNST's products serve -- factual, spans multiple products.",
     "Technical Guide": "Vendor-neutral background on how a sensing technology works -- not product- or competitor-specific.",
     "Historical Sales Record": "A log of real past deals -- evidence, never treated as a recommendable product.",
-    "Internal Sales Strategy": "MNST's own subjective/dated sales judgment (competitive positioning, objections). Excluded from the main Assistant.",
-    "Sales Methodology Reference": "Qualification frameworks, negotiation tactics, outreach cadences -- internal coaching material. Excluded from the main Assistant.",
+    "Competitive & Internal Strategy": "MNST's own subjective/dated sales judgment -- competitor comparisons, positioning, objections. Excluded from the main Assistant.",
+    "Golden Frameworks & Sales Tactics": "Qualification frameworks, negotiation tactics, outreach cadences -- internal coaching material. Excluded from the main Assistant.",
     "Other": "Doesn't fit the categories above yet -- fully open for now, revisit and reclassify when you can.",
 }
 
@@ -200,6 +202,34 @@ def _render_documents_tab() -> None:
         with col3:
             if st.button("Remove", key=f"remove-{doc_path.name}", use_container_width=True):
                 _confirm_remove_dialog(doc_path)
+
+        # A plain-text edit box for a .md document -- e.g. tactics/
+        # framework reference content that's genuinely just prose to
+        # tweak, not a .docx catalogue with tables/nomenclature that
+        # needs a real document editor. Saving re-indexes just this one
+        # document, so an edit takes effect immediately.
+        if doc_path.suffix.lower() == ".md":
+            with st.expander(f"Edit {doc_path.name}"):
+                edited_text = st.text_area(
+                    "Content",
+                    value=doc_path.read_text(encoding="utf-8"),
+                    height=300,
+                    key=f"md-edit-{doc_path.name}",
+                    label_visibility="collapsed",
+                )
+                if st.button("Save changes", key=f"md-save-{doc_path.name}", type="primary"):
+                    doc_path.write_text(edited_text, encoding="utf-8")
+                    with st.spinner("Re-indexing..."):
+                        try:
+                            remove_document_from_index(doc_path.name)
+                            add_document_to_index(doc_path)
+                            rebuild_product_registry(APPROVED_DOCS_DIR)
+                        except RetrieverError as e:
+                            st.session_state.docs_changed_since_rebuild = True
+                            st.error(f"Saved the file, but re-indexing failed: {e}. Use Rebuild Index to retry.")
+                        else:
+                            st.success("Saved and re-indexed.")
+                            st.rerun()
 
     if any(get_document_type(p.name) is None for p in doc_paths):
         st.warning(
@@ -518,6 +548,106 @@ def _render_feedback_tab() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Deals tab -- what Pre-Call Discovery's deal picker actually saves (see
+# app/deals_store.py). The only place to view or clean up a deal outside
+# of raw database access -- there's no rep-facing "delete a deal" anywhere.
+# ---------------------------------------------------------------------------
+@st.dialog("Delete this deal?")
+def _confirm_delete_deal_dialog(
+    deal_id: int, customer_name: str, company: str, linked_requirements: int, linked_sales_aids: int
+) -> None:
+    warning = (
+        f"Permanently delete the deal for **{customer_name}** ({company}), including all captured "
+        "MEDDPICC qualification fields? This cannot be undone."
+    )
+    # deals.db, requirements.db, and sales_aids.db are separate SQLite
+    # files -- there's no cross-database foreign key to enforce this, so
+    # a rep must be told explicitly rather than the delete silently
+    # orphaning rows that still point at a deal_id which no longer exists.
+    if linked_requirements:
+        plural, verb = ("requirement", "references") if linked_requirements == 1 else ("requirements", "reference")
+        warning += (
+            f"\n\n**{linked_requirements} captured {plural}** in Customer Requirements still {verb} "
+            "this deal and will be orphaned (not deleted, but no longer linked to anything)."
+        )
+    if linked_sales_aids:
+        plural, verb = ("sales aid", "references") if linked_sales_aids == 1 else ("sales aids", "reference")
+        warning += (
+            f"\n\n**{linked_sales_aids} generated {plural}** still {verb} this deal and will "
+            "be orphaned the same way."
+        )
+    st.write(warning)
+    col1, col2 = st.columns(2)
+    if col1.button("Delete", type="primary", use_container_width=True):
+        delete_deal(deal_id)
+        st.rerun()
+    if col2.button("Cancel", use_container_width=True):
+        st.rerun()
+
+
+def _render_deals_tab() -> None:
+    deals = list_deals()
+    if not deals:
+        st.caption("No deals started yet -- created from the Deal picker on Pre-Call Discovery.")
+        return
+
+    for deal in deals:
+        with st.container(border=True):
+            filled = len(MEDDPICC_FIELDS) - len(missing_fields(deal))
+            st.markdown(
+                f"**{deal['company']}** -- {deal['customer_name']} · "
+                f"{filled}/{len(MEDDPICC_FIELDS)} MEDDPICC fields captured · "
+                f"updated {deal['updated_at']}"
+            )
+            st.caption(deal["use_case"] or "No use case recorded yet.")
+            still_missing = [label for _, label, _ in missing_fields(deal)]
+            if still_missing:
+                st.caption(f"Still missing: {', '.join(still_missing)}")
+
+            recommendation = get_recommendation(deal)
+            linked_requirements = list_requirements_for_deal(deal["id"])
+            linked_sales_aids = list_sales_aids_for_deal(deal["id"])
+
+            # At-a-glance health row -- proven necessary by testing: a
+            # deal with zero requirements and zero sales aids previously
+            # showed nothing at all here (both expanders below only
+            # render once their count is non-zero), indistinguishable
+            # from a deal an admin just hadn't scrolled to yet.
+            st.markdown(
+                theme.render_deal_status_badges(
+                    recommendation["outcome"] if recommendation else None,
+                    len(linked_requirements),
+                    len(linked_sales_aids),
+                ),
+                unsafe_allow_html=True,
+            )
+            if recommendation:
+                # .get, not [] -- a recommendation saved before the
+                # "product" field existed won't have this key at all.
+                product = recommendation.get("product", "")
+                outcome_line = f"Last recommendation: {recommendation['outcome']}"
+                if product:
+                    outcome_line += f" -- {product}"
+                st.caption(outcome_line)
+
+            if linked_requirements:
+                with st.expander(f"{len(linked_requirements)} linked customer requirement(s)"):
+                    for r in linked_requirements:
+                        st.caption(f"{r['created_at']} -- {r['product_family'] or 'No product selected'}")
+
+            if linked_sales_aids:
+                with st.expander(f"{len(linked_sales_aids)} linked sales aid(s)"):
+                    for a in linked_sales_aids:
+                        st.caption(f"{a['created_at']} -- {get_result(a).get('title') or 'Untitled'}")
+
+            if st.button("Delete", key=f"delete-deal-{deal['id']}", use_container_width=True):
+                _confirm_delete_deal_dialog(
+                    deal["id"], deal["customer_name"], deal["company"],
+                    len(linked_requirements), len(linked_sales_aids),
+                )
+
+
+# ---------------------------------------------------------------------------
 # Customer Requirements tab -- what the Customer Requirements page's form
 # actually saves. Submissions are permanent until an admin deletes one here.
 # ---------------------------------------------------------------------------
@@ -553,12 +683,12 @@ def _render_requirements_form_fields_tab() -> None:
     st.caption(
         "Edit the Customer Requirements page's generic questions -- label, options, whether it's "
         "required, and whether it's shown at all. Changes take effect immediately, no restart needed. "
-        "Built-in fields (Customer Name, Company, Certifications, etc.) can be renamed, relabeled, or "
-        "hidden, but not deleted outright -- they're tied to real stored data or logic elsewhere "
-        "(Customer Name and Company specifically are always required and always shown, regardless of "
-        "the Visible checkbox). Add a new row for a brand-new field; leave its Key blank, it's "
-        "generated from the Label. Per-product ordering options (Output Signal, Range, Background, "
-        "etc.) aren't edited here -- those come straight from the approved product catalogues."
+        "Built-in fields (Industry / Use Case, Certifications, etc.) can be renamed, relabeled, or "
+        "hidden, but not deleted outright -- they're tied to real stored data or logic elsewhere. "
+        "Add a new row for a brand-new field; leave its Key blank, it's generated from the Label. "
+        "Customer Name/Company aren't edited here -- they come from the Deal picker at the top of the "
+        "page. Per-product ordering options (Output Signal, Range, Background, etc.) aren't edited "
+        "here either -- those come straight from the approved product catalogues."
     )
 
     fields = load_fields()
@@ -662,8 +792,8 @@ def render_admin_page() -> None:
 
     _render_rebuild_status()
 
-    documents_tab, approved_tab, restricted_tab, feedback_tab, requirements_tab = st.tabs(
-        ["Documents", "Approved Claims", "Restricted Claims", "Feedback", "Customer Requirements"]
+    documents_tab, approved_tab, restricted_tab, feedback_tab, deals_tab, requirements_tab = st.tabs(
+        ["Documents", "Approved Claims", "Restricted Claims", "Feedback", "Deals", "Customer Requirements"]
     )
 
     with documents_tab:
@@ -677,6 +807,9 @@ def render_admin_page() -> None:
 
     with feedback_tab:
         _render_feedback_tab()
+
+    with deals_tab:
+        _render_deals_tab()
 
     with requirements_tab:
         _render_requirements_admin_tab()

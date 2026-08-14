@@ -18,6 +18,7 @@ import pandas as pd
 import streamlit as st
 
 from app.concentration import ConcentrationRange, parse_concentration_range
+from app.deal_picker import render_deal_picker, set_active_deal
 from app.product_index import NomenclatureSegment, ProductIndexEntry, load_product_index
 from app.requirements_fields import field_map
 from app.requirements_store import list_requirements, record_requirement
@@ -215,6 +216,13 @@ def render_requirements_page() -> None:
     st.title("Customer Requirement Capture")
     st.caption("Capture a customer's technical requirements for a clean handoff to production.")
 
+    # Customer Name/Company now come from the deal picker, not a form
+    # field -- see the Customer Name/Company columns removed below. This
+    # links every requirement submission to a specific deal (deals.db),
+    # the same identity Pre-Call Discovery already uses, instead of a
+    # standalone, unlinked record each time.
+    deal_id, customer_name, company, _deal_use_case = render_deal_picker("requirements")
+
     try:
         products, _ = load_product_index()
     except (FileNotFoundError, OSError):
@@ -347,10 +355,6 @@ def render_requirements_page() -> None:
     # record if Customer Name/Company happen to already be filled. A
     # rep should only submit via the actual button.
     with st.form("requirement_form", clear_on_submit=True, enter_to_submit=False):
-        col1, col2 = st.columns(2)
-        customer_name = col1.text_input(_label("customer_name", "Customer Name"))
-        company = col2.text_input(_label("company", "Company"))
-
         industries = (
             st.multiselect(_label("industries", "Industry / Use Case"), _options("industries", INDUSTRY_USE_CASES + ["Other"]))
             if _visible("industries") else []
@@ -452,8 +456,8 @@ def render_requirements_page() -> None:
         submitted = st.form_submit_button("Save Requirement", type="primary")
 
     if submitted:
-        if not customer_name or not company:
-            st.error("Customer Name and Company are required.")
+        if deal_id is None:
+            st.error("Pick an existing deal, or start a new one above (Customer Name + Company), first.")
         else:
             application = ", ".join(industries)
             if application_details:
@@ -477,6 +481,12 @@ def render_requirements_page() -> None:
             if selected_product is not None and choosable_segments and len(segment_selections) == len(choosable_segments):
                 suggested_code = _suggested_code(selected_product, segment_selections)
 
+            # deal_id is guaranteed set here -- the check above already
+            # rejected deal_id is None, and deal creation is now fully
+            # owned by render_deal_picker()'s own atomic "Start New
+            # Deal" form (see app/deal_picker.py).
+            set_active_deal(deal_id)
+
             record_requirement(
                 customer_name=customer_name,
                 company=company,
@@ -498,11 +508,17 @@ def render_requirements_page() -> None:
                 suggested_code=suggested_code,
                 additional_requirements=additional,
                 extra_fields=json.dumps({k: v for k, v in custom_values.items() if v}, ensure_ascii=False),
+                deal_id=deal_id,
             )
             msg = f"Saved requirement for {customer_name} ({company})."
             if suggested_code:
                 msg += f" Suggested product code: **{suggested_code}**."
             st.success(msg)
+            # No st.rerun() here -- unlike Discovery, this page shows the
+            # success message (with the suggested product code) inline,
+            # which a rerun would discard before it's ever rendered. The
+            # deal picker above will show the newly created deal as soon
+            # as the rep's next interaction reruns the script anyway.
 
     st.divider()
     st.subheader("Recent Requirements")
