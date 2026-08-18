@@ -217,6 +217,104 @@ def _parse_selectable_table(table: Table, codes: list[str] | None = None) -> dic
     return {k: v for k, v in values.items() if v}
 
 
+def _parse_freeform_selectable_table(table: Table) -> dict[str, str]:
+    """Parses a "Selectable <X>" table into {option name: description}
+    when there's no real short code to key by at all -- unlike
+    _parse_selectable_table (which resolves a genuine ordering-code
+    letter via a Span match or a parenthesized code), this is for a
+    table that documents a real customer choice with NO corresponding
+    position in the product's own order-code suffix (see
+    _extract_additional_selectable_parameters). The column's own header
+    text (e.g. "Range 1", "Air") is the only identifier these tables
+    ever give, so that's what gets used as the key -- proven necessary
+    by testing: VISION H2 LD's "Selectable Range"/"Selectable Background
+    Gas"/etc tables have neither a Span row nor a parenthesized code
+    anywhere, so _parse_selectable_table always returned {} for them,
+    silently dropping four of its five documented selectable parameters
+    even though Output Signal (which does have a code) came through
+    fine."""
+    rows = [[c.text.strip() for c in row.cells] for row in table.rows]
+    if not rows or len(rows[0]) < 2:
+        return {}
+    col_names = {i: cell for i, cell in enumerate(rows[0][1:], start=1) if cell}
+    if not col_names:
+        return {}
+
+    data_rows = rows[1:]
+    values: dict[str, str] = {}
+    for col_idx, name in col_names.items():
+        if data_rows:
+            parts = [
+                f"{row[0]}: {row[col_idx]}"
+                for row in data_rows
+                if col_idx < len(row) and row[col_idx] and row[0]
+            ]
+            value = "; ".join(parts) if parts else "Unknown"
+        else:
+            # Single-row table (e.g. Background Gas) -- the header row IS
+            # the data, so the option name itself is the complete answer,
+            # same convention _parse_selectable_table's own docstring
+            # describes for this shape.
+            value = "Unknown"
+        # Two different columns can share the literal same header text
+        # (e.g. VISION's Compatible Interfaces table has two separate
+        # columns both labeled "0.5-3.5V or RS485", each with its own,
+        # genuinely different interface list underneath) -- keying only
+        # by name would silently let the second overwrite the first,
+        # losing real data. Disambiguate any repeat with its column
+        # position instead of dropping it.
+        key = name if name not in values else f"{name} ({col_idx})"
+        values[key] = value
+    return values
+
+
+def _extract_additional_selectable_parameters(
+    doc: Document, resolved_labels: list[str]
+) -> dict[str, dict[str, str]]:
+    """Every "Selectable <X>" table in the document that ISN'T already
+    captured as a real ordering-code segment (see _extract_nomenclature)
+    -- e.g. VISION H2 LD's ordering code ("VISION H2 LD XX*") only has
+    one selectable position (Output Signal), but the document separately
+    documents Range, Background Gas, Compatible Interfaces, and
+    Connector Option as real selectable specs too, each with its own
+    "Selectable <X>" table -- these have no code position at all, yet
+    are still real choices a customer makes and a rep needs to record.
+    Proven necessary by direct feedback: these were being silently
+    dropped entirely, since the only extraction path ran through the
+    ordering-code nomenclature table, which never looks at a
+    "Selectable <X>" table unless a matching code segment already led
+    it there. resolved_labels are the nomenclature labels that DID
+    already consume their own table via _find_selectable_table, so they
+    aren't re-added here as a duplicate."""
+    # Identity by the underlying XML element (table._tbl), not the
+    # python-docx Table wrapper itself -- proven necessary by testing:
+    # doc.tables constructs a fresh Table wrapper object on every
+    # access, even for the exact same table, so id(table) never matches
+    # across the separate _find_selectable_table() call here versus the
+    # for-loop below, silently defeating this whole dedup check. The
+    # wrapped lxml element is the same object every time, regardless of
+    # how many times .tables is accessed.
+    claimed_tables = {
+        id(t._tbl) for label in resolved_labels if (t := _find_selectable_table(doc, label)) is not None
+    }
+    result: dict[str, dict[str, str]] = {}
+    for table in doc.tables:
+        if id(table._tbl) in claimed_tables:
+            continue
+        if not table.rows or not table.rows[0].cells:
+            continue
+        header_cell = table.rows[0].cells[0].text.strip()
+        if not header_cell.lower().startswith("selectable"):
+            continue
+        label = re.sub(r"(?i)^selectable\s+", "", header_cell.split("\n")[0]).strip()
+        if not label or label in result:
+            continue
+        values = _parse_freeform_selectable_table(table)
+        if values:
+            result[label] = values
+    return result
+
+
 def _find_selectable_table(doc: Document, label: str) -> Table | None:
     """Finds a "Selectable <X>" table elsewhere in the document matching
     a nomenclature segment's own label (e.g. label "Range" -> the table
@@ -277,7 +375,7 @@ def _extract_nomenclature(doc: Document) -> dict[str, Any]:
             heading_idx = i
             break
     if heading_idx is None:
-        return {"aliases": [], "segments": {}}
+        return {"aliases": [], "segments": {}, "table_resolved_labels": []}
 
     template_line, label_line, template_table, label_line_idx, value_row = None, None, None, None, None
     for j in range(heading_idx + 1, min(heading_idx + 10, len(items))):
@@ -320,6 +418,7 @@ def _extract_nomenclature(doc: Document) -> dict[str, Any]:
 
     segments: dict[str, Any] = {}
     aliases: list[str] = []
+    table_resolved_labels: list[str] = []
     codes = None
     if template_line and label_line:
         codes = [c.strip() for c in template_line.split("\t") if c.strip()]
@@ -416,6 +515,13 @@ def _extract_nomenclature(doc: Document) -> dict[str, Any]:
 
             if values:
                 segments[code] = {"label": label, "values": values}
+                # Tracked regardless of which path resolved it (table,
+                # bullet-list, inline value row, or slash-list) -- any of
+                # them means this label is already fully represented in
+                # `nomenclature`, so _extract_additional_selectable_
+                # parameters must not also re-capture its "Selectable
+                # <X>" table as if it were a second, separate parameter.
+                table_resolved_labels.append(label)
 
         # A code position left as a bare label string (never converted
         # above) either has no real value at all -- a pure identity token
@@ -438,7 +544,7 @@ def _extract_nomenclature(doc: Document) -> dict[str, Any]:
             if fixed_value:
                 segments[code] = {"label": label, "values": {"*": fixed_value}}
 
-    return {"aliases": aliases, "segments": segments}
+    return {"aliases": aliases, "segments": segments, "table_resolved_labels": table_resolved_labels}
 
 
 def _is_eligible_catalogue(path: Path) -> bool:
@@ -489,6 +595,16 @@ def build_product_registry(docs_dir: str | Path = "data/approved_docs") -> dict[
         doc = Document(path)  # still needed: _extract_nomenclature wants the raw docx structure
         nomenclature = _extract_nomenclature(doc)
         all_aliases = {product_name} | {a for a in nomenclature["aliases"] if a}
+        # Real selectable specs documented with their own "Selectable <X>"
+        # table but no position in the product's own ordering-code suffix
+        # at all (e.g. VISION H2 LD's Range/Background Gas/Compatible
+        # Interfaces/Connector Option) -- see
+        # _extract_additional_selectable_parameters for why these need a
+        # separate extraction path from the ordering-code nomenclature
+        # above.
+        additional_selectable_parameters = _extract_additional_selectable_parameters(
+            doc, nomenclature["table_resolved_labels"]
+        )
 
         products.append({
             "product_name": product_name,
@@ -500,6 +616,7 @@ def build_product_registry(docs_dir: str | Path = "data/approved_docs") -> dict[
             "source_catalogue": path.name,
             "aliases": sorted(all_aliases),
             "nomenclature": nomenclature["segments"] or "Unknown",
+            "additional_selectable_parameters": additional_selectable_parameters,
         })
 
     return {"products": products, "technology_aliases": TECHNOLOGY_ALIASES}

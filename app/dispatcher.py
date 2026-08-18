@@ -80,6 +80,21 @@ _ASK_ABOUT_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Same weak-trigger treatment as _ASK_ABOUT_RE, for bare "list"/"show"
+# phrasings that don't say "list all" -- e.g. "list analyzers". Proven
+# necessary by testing: "list analyzers" named a real, tracked product_type
+# value ("Analyzer") but fell through this dispatcher entirely because
+# _LIST_ALL_RE requires the literal "list all" and _WHICH_WHAT_PRODUCTS_RE
+# requires a "which/what" framing -- neither present here. That sent an
+# unscoped, all-6-products retrieval to the LLM, which (correctly following
+# the system prompt's distinct-device rule) produced a verbose per-product
+# checklist instead of the one-line deterministic answer the Product Index
+# already had. Only trusted alongside a real attribute match, same as
+# _ASK_ABOUT_RE, so a bare "list"/"show" with no real filter still falls
+# through to the existing safe behavior instead of misfiring on some
+# unrelated request.
+_LIST_KEYWORD_RE = re.compile(r"\b(list|show)\b", re.IGNORECASE)
+
 # A question asking about "the [attribute] sensor/detector/..." as if it
 # names exactly one product -- e.g. "the portable sensor" -- when the
 # named attribute may actually match several real products. Reuses the
@@ -580,7 +595,11 @@ def dispatch(question: str) -> Optional[DispatchResult]:
     attribute_matches = _match_all_attributes(question, tech_aliases)
     is_list_request = bool(_LIST_ALL_RE.search(question)) or (
         bool(attribute_matches)
-        and (bool(_WHICH_WHAT_PRODUCTS_RE.search(question)) or bool(_ASK_ABOUT_RE.search(question)))
+        and (
+            bool(_WHICH_WHAT_PRODUCTS_RE.search(question))
+            or bool(_ASK_ABOUT_RE.search(question))
+            or bool(_LIST_KEYWORD_RE.search(question))
+        )
     )
 
     # Two or more matches: before falling through to unscoped RAG (which

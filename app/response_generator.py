@@ -12,7 +12,7 @@ from typing import Any, Iterator, Optional
 
 from dotenv import load_dotenv
 
-from app.claim_checker import check_restricted_claims
+from app.claim_checker import check_restricted_claims, guardrail_source_text
 from app.concentration import conversion_grounding_note, detect_conversion_request
 from app.intent import Intent, UNKNOWN_INTENT
 from app.retriever import is_ambiguous_product_reference, is_self_referential_without_own_products
@@ -526,7 +526,7 @@ def finalize_answer(question: str, retrieval: dict[str, Any], answer_text: str) 
     # A customer-facing rewrite is blocked unless the source text itself
     # backs every restricted term matched -- a confident retrieval can't
     # launder an answer that goes beyond what the source actually says.
-    claim_result = check_restricted_claims(question, answer_text, source_text)
+    claim_result = check_restricted_claims(question, answer_text, guardrail_source_text(matches))
 
     return GeneratedAnswer(
         answer=answer_text,

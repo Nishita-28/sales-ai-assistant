@@ -437,6 +437,31 @@ def chunk_document(
     return chunks
 
 
+def chunk_approved_claims(document_name: str, bullets: list[str]) -> list[Chunk]:
+    """One chunk per bullet -- deliberately bypasses chunk_document's
+    general word-count packing (see DEFAULT_CHUNK_SIZE's own comment:
+    "how many short facts share a chunk"). That packing is a good
+    default for a document's prose, where nearby short facts usually
+    share context, but Approved Claims bullets are independent, atomic
+    facts spanning unrelated topics (certifications, warranty, pricing,
+    ...) -- proven necessary by testing: a bullet appended after three
+    AURIGA-related ones never surfaced for its own query at all, even
+    fully unscoped, because the shared chunk's embedding read as "about
+    AURIGA," burying everything else packed in with it."""
+    total = len(bullets)
+    return [
+        Chunk(
+            text=f"Approved Claims: {bullet}",
+            document_name=document_name,
+            product_name="Approved Claims",
+            chunk_index=i,
+            total_chunks=total,
+            section_heading="Approved Claims",
+        )
+        for i, bullet in enumerate(bullets)
+    ]
+
+
 def chunk_documents(
     documents: dict[str, Any] | list[dict[str, Any]],
     chunk_size: int = DEFAULT_CHUNK_SIZE,

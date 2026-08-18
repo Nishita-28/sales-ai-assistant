@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
-from app.claim_checker import check_restricted_claims
+from app.claim_checker import check_restricted_claims, guardrail_source_text
 from app.generation_helpers import build_context_block, dedupe_sources, extract_list_items, split_sections
 from app.response_generator import ResponseGeneratorError, _call_llm_stream
 
@@ -594,8 +594,7 @@ def finalize_recommendation(
         _parse_recommendation_reply(raw_reply)
     )
 
-    source_text = " ".join(m.get("text", "") for m in matches)
-    claim_result = check_restricted_claims(qa_block, recommendation, source_text)
+    claim_result = check_restricted_claims(qa_block, recommendation, guardrail_source_text(matches))
 
     return RecommendationResult(
         confirmed_priorities=confirmed_priorities,

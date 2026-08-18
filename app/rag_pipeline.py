@@ -190,11 +190,13 @@ if __name__ == "__main__":
             raise SystemExit(1)
         doc_path = Path(sys.argv[idx + 1])
         try:
-            count = add_document_to_index(doc_path)
+            count, warnings = add_document_to_index(doc_path)
         except RetrieverError as e:
             print(f"Indexing failed: {e}", file=sys.stderr)
             raise SystemExit(1)
         print(f"Indexed {count} chunks from {doc_path.name} (other documents untouched).")
+        for w in warnings:
+            print(f"WARNING: {w}", file=sys.stderr)
         registry_count = rebuild_product_registry(doc_path.parent)
         print(f"Rebuilt Product Registry: {registry_count} products.")
         raise SystemExit(0)

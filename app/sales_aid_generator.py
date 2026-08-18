@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
 
-from app.claim_checker import check_restricted_claims
+from app.claim_checker import check_restricted_claims, guardrail_source_text
 from app.generation_helpers import (
     build_context_block,
     dedupe_sources,
@@ -166,8 +166,7 @@ def finalize_sales_aid(
     customer_priorities, title, use_case_framing, comparison, customer_summary = _parse_reply(raw_reply)
 
     full_text = "\n".join([title, use_case_framing, *comparison, customer_summary])
-    source_text = " ".join(m.get("text", "") for m in matches)
-    claim_result = check_restricted_claims(use_case_description, full_text, source_text)
+    claim_result = check_restricted_claims(use_case_description, full_text, guardrail_source_text(matches))
 
     return SalesAidResult(
         customer_priorities=customer_priorities,

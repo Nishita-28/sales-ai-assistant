@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app import theme
 from app.admin_page import render_admin_page
+from app.background_jobs import get_active_jobs
 from app.claim_checker import warm_up as warm_up_claim_checker
 from app.discovery_page import render_discovery_page
 from app.feedback_store import record_feedback
@@ -165,6 +166,23 @@ def count_approved_docs() -> int:
     return sum(1 for p in APPROVED_DOCS_DIR.iterdir() if p.is_file())
 
 
+@st.fragment(run_every="3s")
+def _render_background_job_status() -> None:
+    """A background document-removal job (see app.background_jobs and
+    admin_page._confirm_remove_dialog) has no way to push an update into
+    any browser session -- this fragment polls its shared, in-process
+    status dict on a short timer instead, independent of whatever page
+    is actually active, so "still removing" / "done" / "failed" shows up
+    here without blocking or refreshing the rest of the page."""
+    for job in get_active_jobs():
+        if job.status == "running":
+            st.info(f"Removing **{job.label}**...")
+        elif job.status == "done":
+            st.success(f"Removed **{job.label}**.")
+        else:
+            st.error(f"Failed to remove **{job.label}**: {job.error}")
+
+
 with st.sidebar:
     if theme.is_enterprise_theme():
         # Logo is rendered separately (see theme.py) positioned above the
@@ -183,6 +201,7 @@ with st.sidebar:
             """,
             unsafe_allow_html=True,
         )
+        _render_background_job_status()
     else:
         st.subheader("Knowledge base")
 
@@ -190,6 +209,7 @@ with st.sidebar:
         st.success(f"Indexed docs: {count_approved_docs()}")
         st.info("Claim guardrail: ON")
         st.warning("Mode: Internal only")
+        _render_background_job_status()
 
         with st.expander("Admin sign-in"):
             if not ADMIN_PASSWORD:

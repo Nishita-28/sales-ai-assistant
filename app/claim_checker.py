@@ -7,13 +7,22 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from app.restricted_policy import PolicyError, build_lookup, load_entries
 
 NONE_CATEGORY = "None"
 
 POLICY_PATH = Path("data/restricted_claims.yaml")
+
+# Indexed alongside the real approved documents (see
+# retriever.load_and_chunk_approved_docs) so admin-entered Approved Claims
+# text is retrievable and can inform an answer -- but it's admin-typed,
+# not independently verified against the approved documents at check
+# time, so it must not be able to satisfy a restricted-category claim
+# (pricing, certifications, safety, delivery) on its own. See
+# guardrail_source_text below.
+APPROVED_CLAIMS_DOCUMENT_NAME = "approved_claims.md"
 
 _policy_cache: Optional[tuple[float, dict[str, list[str]], set[str]]] = None
 
@@ -78,6 +87,20 @@ class ClaimCheckResult:
     is_blocked: bool
     matched_terms: list[str]
     unsupported_terms: list[str]
+
+
+def guardrail_source_text(matches: list[dict[str, Any]]) -> str:
+    """Joins retrieved-chunk text for the restricted-claims support check,
+    excluding anything sourced from Approved Claims -- a restricted-
+    category claim (pricing, certifications, safety, delivery) must still
+    be backed by a real approved document to count as supported, not just
+    an admin-typed reference bullet. Approved Claims chunks ARE still
+    retrieved and used to help answer everything else; this only affects
+    what check_restricted_claims is allowed to treat as evidence."""
+    return " ".join(
+        m.get("text", "") for m in matches
+        if m.get("metadata", {}).get("document_name") != APPROVED_CLAIMS_DOCUMENT_NAME
+    )
 
 
 def check_restricted_claims(question: str, answer_text: str, source_text: str) -> ClaimCheckResult:

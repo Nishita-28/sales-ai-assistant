@@ -290,14 +290,36 @@ def build_index(chunks: list[dict[str, Any]]) -> int:
     return _upsert_chunks(collection, chunks)
 
 
-def add_document_to_index(path: str | Path) -> int:
+def add_document_to_index(path: str | Path) -> tuple[int, list[str]]:
     """Loads, chunks, and embeds a single document, then upserts it into
-    the existing index -- other documents' chunks are left untouched."""
-    from app.chunker import assign_product_name_avoiding, chunk_document
+    the existing index -- other documents' chunks are left untouched.
+    Returns (chunk_count, warnings) -- warnings are load_document()'s own
+    coverage/structure checks (dropped cells, implausible header
+    detection), previously computed here and silently discarded instead
+    of ever reaching an admin. See document_loader.check_table_structure
+    for why a document can have real, serious problems -- a table's real
+    header silently replaced by unrelated body text -- that produce zero
+    dropped-cell warnings, since nothing is actually missing, just
+    organized wrong."""
+    from app.chunker import assign_product_name_avoiding, chunk_approved_claims, chunk_document
+    from app.claim_checker import APPROVED_CLAIMS_DOCUMENT_NAME
     from app.document_loader import load_document
 
-    document = load_document(Path(path))
+    path = Path(path)
     collection = get_collection()
+
+    if path.name == APPROVED_CLAIMS_DOCUMENT_NAME:
+        # One bullet per chunk -- see chunk_approved_claims's own
+        # docstring for why chunk_document's general word-count packing
+        # is wrong for this file specifically.
+        from app.claims_store import load_claims
+
+        _, bullets = load_claims(path)
+        chunks = [c.to_dict() for c in chunk_approved_claims(path.name, bullets)]
+        count = _upsert_chunks(collection, chunks)
+        return count, []
+
+    document = load_document(path)
 
     existing_names = {
         m["product_name"]
@@ -307,7 +329,8 @@ def add_document_to_index(path: str | Path) -> int:
     product_name = assign_product_name_avoiding(document, existing_names)
 
     chunks = [c.to_dict() for c in chunk_document(document, product_name)]
-    return _upsert_chunks(collection, chunks)
+    count = _upsert_chunks(collection, chunks)
+    return count, document["warnings"]
 
 
 def remove_document_from_index(document_name: str) -> None:
@@ -1007,23 +1030,32 @@ def retrieve(
             # the fairness _retrieve_balanced_across_products just built
             # (confirmed by testing -- see _interleave_balanced_matches).
             matches = _interleave_balanced_matches(matches, mentioned)
+        elif boosted:
+            matches.sort(key=lambda m: m["similarity"], reverse=True)
 
+        if len(mentioned) >= 1:
             # Supplement with a genuinely unscoped pass (respecting only
             # exclude_where, not the product_name restriction) appended
-            # after the balanced block, never mixed into the interleave
-            # itself. Proven necessary by testing: dispatcher.py forces
-            # mentioned_products to every currently approved product for
-            # a question naming no specific one (e.g. "what industries
-            # use the fixed hydrogen leak detector"), so that a spec
-            # comparison gets fair per-product coverage -- but
-            # _retrieve_balanced_across_products queries strictly by
-            # product_name, which structurally can never surface a
-            # reference document (the Industry Use Case Guide, exactly
-            # what that question needs) since its chunks aren't tagged
-            # with any of those product names at all. This has no effect
-            # when exclude_where already rules reference documents out
-            # (a genuine multi-product comparison, which intentionally
-            # excludes them -- see dispatcher._scoped_result).
+            # after whatever's already in matches, never mixed into the
+            # ranked/interleaved order. Proven necessary by testing, two
+            # ways: (1) dispatcher.py forces mentioned_products to every
+            # currently approved product for a question naming no specific
+            # one (e.g. "what industries use the fixed hydrogen leak
+            # detector"), so that a spec comparison gets fair per-product
+            # coverage -- but _retrieve_balanced_across_products queries
+            # strictly by product_name, which structurally can never
+            # surface a reference document (the Industry Use Case Guide,
+            # exactly what that question needs) since its chunks aren't
+            # tagged with any product name at all; (2) the exact same gap
+            # for a single clearly-named product -- "what is PORTaHY's
+            # recommended probe length" never saw any Approved Claims
+            # content at all without this, since boost_where =
+            # {"product_name": mentioned[0]} excludes every reference
+            # document just as completely as the multi-product path did.
+            # This has no effect when exclude_where already rules
+            # reference documents out (a genuine multi-product comparison,
+            # which intentionally excludes them -- see
+            # dispatcher._scoped_result).
             try:
                 supplement = collection.query(
                     query_embeddings=query_embedding,
@@ -1038,9 +1070,7 @@ def retrieve(
                         matches.append({"text": text, "metadata": metadata, "similarity": 1 - distance})
                         existing_texts.add(text)
             except Exception:
-                pass  # the balanced, per-product matches already found are enough to proceed on
-        elif boosted:
-            matches.sort(key=lambda m: m["similarity"], reverse=True)
+                pass  # the scoped matches already found are enough to proceed on
 
     # max() not matches[0]: the list-all-products branch orders by document
     # name for readability, not similarity.
@@ -1061,31 +1091,56 @@ SUPPORTED_DOC_EXTENSIONS = {".docx", ".pptx", ".pdf", ".csv", ".xlsx", ".md", ".
 
 
 def load_and_chunk_approved_docs(docs_dir: str | Path = "data/approved_docs") -> list[dict[str, Any]]:
-    """Loads and chunks every supported file in docs_dir, returning plain
-    dicts ready for build_index(). A file that fails to load is skipped
-    with a warning rather than aborting the whole reindex."""
-    from app.chunker import chunk_documents
+    """Loads and chunks every supported file in docs_dir, plus the
+    Approved Claims reference file (see app.claim_checker.
+    APPROVED_CLAIMS_DOCUMENT_NAME), always -- it lives outside docs_dir
+    (it's admin-managed content, not a rep-uploaded document, so it stays
+    out of the Documents tab's list/remove/type-assignment UI), but still
+    needs to be part of every full rebuild so it survives a server
+    restart, not just the one-off reindex the Approved Claims tab's own
+    Save button triggers. Returns plain dicts ready for build_index().
+    A file that fails to load is skipped with a warning rather than
+    aborting the whole reindex."""
+    from app.chunker import chunk_approved_claims, chunk_documents
+    from app.claim_checker import APPROVED_CLAIMS_DOCUMENT_NAME
+    from app.claims_store import load_claims
     from app.document_loader import load_document
 
     docs_dir = Path(docs_dir)
     if not docs_dir.exists():
         print(f"WARNING: {docs_dir} does not exist -- nothing to index.", file=sys.stderr)
-        return []
 
     documents: list[dict[str, Any]] = []
-    for path in sorted(docs_dir.iterdir()):
-        if not path.is_file() or path.suffix.lower() not in SUPPORTED_DOC_EXTENSIONS:
+    paths = sorted(docs_dir.iterdir()) if docs_dir.exists() else []
+
+    for path in paths:
+        # "~$..." lock files Word/Excel/PowerPoint drop next to a
+        # document while it's open elsewhere -- not a real document,
+        # already handled gracefully by the try/except below (fails to
+        # load, gets skipped with a warning), but excluding it outright
+        # avoids that wasted attempt and spurious warning every rebuild.
+        if not path.is_file() or path.suffix.lower() not in SUPPORTED_DOC_EXTENSIONS or path.name.startswith("~$"):
             continue
         try:
             documents.append(load_document(path))
         except Exception as e:
             print(f"WARNING: failed to load {path.name}: {e}", file=sys.stderr)
 
-    if not documents:
+    chunks = chunk_documents(documents) if documents else []
+
+    # Approved Claims chunked separately, one bullet per chunk -- see
+    # chunk_approved_claims's own docstring for why the general word-
+    # count packing above is wrong for this file specifically.
+    approved_claims_path = Path("data") / APPROVED_CLAIMS_DOCUMENT_NAME
+    if approved_claims_path.exists():
+        _, bullets = load_claims(approved_claims_path)
+        if bullets:
+            chunks.extend(chunk_approved_claims(APPROVED_CLAIMS_DOCUMENT_NAME, bullets))
+
+    if not chunks:
         print(f"WARNING: no supported documents found in {docs_dir}.", file=sys.stderr)
         return []
 
-    chunks = chunk_documents(documents)
     return [chunk.to_dict() for chunk in chunks]
 
 

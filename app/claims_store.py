@@ -1,6 +1,10 @@
-"""Reads and writes a claims file as a header plus a flat bullet list, so
-the Admin UI can list/add/edit/delete claims without hand-editing
-markdown. This is reference documentation only, not enforced policy."""
+"""Reads and writes the Approved Claims file as a header plus a flat
+bullet list, so the Admin UI can list/add/edit/delete claims without
+hand-editing markdown. Indexed into retrieval (see
+app.retriever.load_and_chunk_approved_docs), so this content can inform
+an answer -- but it's not enforced policy the way restricted_claims.yaml
+is: it can't, on its own, satisfy a restricted-category claim (see
+app.claim_checker.guardrail_source_text)."""
 from __future__ import annotations
 
 from pathlib import Path

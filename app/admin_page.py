@@ -7,11 +7,13 @@ from __future__ import annotations
 import shutil
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 import pandas as pd
 import streamlit as st
 
 from app import theme
+from app.background_jobs import start_job
 from app.claims_store import load_claims, save_claims
 from app.deals_store import MEDDPICC_FIELDS, delete_deal, get_recommendation, list_deals, missing_fields
 from app.document_types import (
@@ -31,8 +33,11 @@ from app.feedback_store import (
     recent_reports,
     resolve_feedback,
 )
+from app import product_field_overrides
+from app.concentration import ConcentrationRange
+from app.product_index import NomenclatureSegment, load_product_index
 from app.registry_builder import rebuild_product_registry
-from app.requirements_fields import FIELD_TYPES, load_fields, merge_core_fields, save_fields, unique_key
+from app.requirements_fields import FIELD_TYPES, load_fields, save_fields, unique_key
 from app.requirements_store import delete_requirement, list_requirements, list_requirements_for_deal
 from app.sales_aid_store import get_result, list_sales_aids_for_deal
 from app.restricted_policy import KNOWN_CATEGORIES, PolicyEntry, load_entries, save_entries
@@ -57,13 +62,22 @@ RESTRICTED_CLAIMS_PATH = Path("data/restricted_claims.yaml")
 # ---------------------------------------------------------------------------
 def _approved_doc_paths() -> list[Path]:
     """Only files that are actually indexable -- an unsupported file in the
-    folder is real on disk but contributes zero chunks."""
+    folder is real on disk but contributes zero chunks. Also excludes
+    Word/Excel/PowerPoint's own "~$..." lock files -- proven necessary
+    by direct feedback: opening one of the real approved .docx files in
+    Word (to review or edit it) drops a same-named "~$..." lock file
+    right into this same folder, which was being listed as if it were
+    a real 14th document (0 KB, unclassified) -- confusing on its own,
+    and removing it could leave the "Remove document?" dialog open
+    afterward, since the lock file was never a real, chunkable document
+    in the first place and reindexing "removal" of something that was
+    never really indexed could error."""
     if not APPROVED_DOCS_DIR.exists():
         return []
     return sorted(
         p
         for p in APPROVED_DOCS_DIR.iterdir()
-        if p.is_file() and p.suffix.lower() in SUPPORTED_DOC_EXTENSIONS
+        if p.is_file() and p.suffix.lower() in SUPPORTED_DOC_EXTENSIONS and not p.name.startswith("~$")
     )
 
 
@@ -90,7 +104,15 @@ def _render_rebuild_status() -> None:
         else:
             st.info(status)
     with col2:
-        if st.button("Rebuild Index Now", type="primary", use_container_width=True):
+        if st.button(
+            "Rebuild Index Now",
+            type="primary",
+            use_container_width=True,
+            help=(
+                "Rebuild is automatic after adding, removing, or editing a document. "
+                "Use this after a failed rebuild or when changing an existing document's Type."
+            ),
+        ):
             with st.spinner("Rebuilding index -- this can take a minute..."):
                 try:
                     chunks = load_and_chunk_approved_docs(APPROVED_DOCS_DIR)
@@ -116,38 +138,113 @@ def _confirm_remove_dialog(doc_path: Path) -> None:
     )
     col1, col2 = st.columns(2)
     if col1.button("Remove", type="primary", use_container_width=True):
+        # The file move + type removal are near-instant, so they happen
+        # right here -- the document disappears from "Current documents"
+        # immediately. The slow part (removing it from the vector index,
+        # then a full registry rebuild -- ~a minute, see
+        # registry_builder.rebuild_product_registry's own docstring) runs
+        # on a background thread instead (see app.background_jobs), so
+        # this dialog can close immediately rather than sitting on a
+        # blocking spinner. Status shows in the sidebar on every page
+        # until it finishes (see streamlit_app.py's sidebar fragment).
         REMOVED_DOCS_DIR.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(doc_path), str(REMOVED_DOCS_DIR / doc_path.name))
-        remove_document_type(doc_path.name)
-        try:
-            remove_document_from_index(doc_path.name)
+        doc_name = doc_path.name
+        shutil.move(str(doc_path), str(REMOVED_DOCS_DIR / doc_name))
+        remove_document_type(doc_name)
+
+        def _finish_removal(doc_name: str = doc_name) -> None:
+            remove_document_from_index(doc_name)
             rebuild_product_registry(APPROVED_DOCS_DIR)
-        except RetrieverError as e:
-            st.session_state.docs_changed_since_rebuild = True
-            st.error(f"Moved the file, but removing it from the index failed: {e}. Use Rebuild Index to retry.")
-        else:
-            st.rerun()
+
+        start_job(f"remove-{doc_name}", doc_name, _finish_removal)
+        st.rerun()
     if col2.button("Cancel", use_container_width=True):
         st.rerun()
 
 
 _TYPE_HELP = {
-    "Product Catalogue": "One specific purchasable product's exact specs and ordering codes. Populates the Product Registry.",
-    "Use Case Guide": "Which industries/applications MNST's products serve -- factual, spans multiple products.",
-    "Technical Guide": "Vendor-neutral background on how a sensing technology works -- not product- or competitor-specific.",
-    "Historical Sales Record": "A log of real past deals -- evidence, never treated as a recommendable product.",
-    "Competitive & Internal Strategy": "MNST's own subjective/dated sales judgment -- competitor comparisons, positioning, objections. Excluded from the main Assistant.",
-    "Golden Frameworks & Sales Tactics": "Qualification frameworks, negotiation tactics, outreach cadences -- internal coaching material. Excluded from the main Assistant.",
-    "Other": "Doesn't fit the categories above yet -- fully open for now, revisit and reclassify when you can.",
+    "Product Catalogue": "One specific product's exact specs and ordering options.",
+    "Use Case Guide": "Which industries and applications MNST's products serve.",
+    "Technical Guide": "General background on how a sensing technology works.",
+    "Historical Sales Record": "A log of past deals, used as supporting evidence.",
+    "Competitive & Internal Strategy": "Competitor comparisons and internal sales positioning.",
+    "Golden Frameworks & Sales Tactics": "Qualification frameworks and sales tactics for internal coaching.",
+    "Other": "Doesn't fit the categories above yet.",
+}
+
+# Which page(s) each type feeds, read off the real routing logic (app/
+# document_types.py's MAIN_ASSISTANT_EXCLUDED_TYPES, is_product_catalogue,
+# and discovery_generator.py's methodology/recommendable scoping) rather
+# than restated from memory, so this can't quietly drift out of sync with
+# what the code does -- kept plain (just the page list) per explicit
+# feedback that the routing rationale belongs in code comments, not this
+# admin-facing copy. Shown once in a reference expander rather than
+# repeated under every document row -- a caption per row was tried for the
+# field editor earlier and multiplying per-row elements is exactly what
+# previously caused a Streamlit tab-rendering bug on this same page (see
+# _render_product_field_row's comment).
+_TYPE_USED_BY = {
+    "Product Catalogue": "Assistant, Discovery Questions, Sales Aids, Customer Requirements",
+    "Use Case Guide": "Assistant, Discovery Questions, Sales Aids",
+    "Technical Guide": "Assistant, Discovery Questions, Sales Aids",
+    "Historical Sales Record": "Assistant, Discovery Questions, Sales Aids",
+    "Competitive & Internal Strategy": "Discovery Questions, Sales Aids",
+    "Golden Frameworks & Sales Tactics": "Discovery Questions, Sales Aids",
+    "Other": "Assistant, Discovery Questions, Sales Aids",
 }
 
 
+def _render_upload_result() -> None:
+    """Persists the outcome of the last upload/re-index across the
+    st.rerun() that follows it -- a plain st.success()/st.warning() right
+    before st.rerun() would only flash briefly, easy to miss for
+    something correctness-critical like a structural-review warning.
+    Stays visible until the admin dismisses it or triggers another
+    upload/save, which overwrites it."""
+    result = st.session_state.get("last_upload_result")
+    if not result:
+        return
+    name, count, doc_type, warnings = result
+    count_part = f" ({count} chunks)" if count is not None else ""
+    type_part = f" as {doc_type}" if doc_type else ""
+    if warnings:
+        st.warning(
+            f"Indexed **{name}**{count_part}{type_part}, but with issues found during extraction:\n\n"
+            + "\n".join(f"- {w}" for w in warnings)
+        )
+    else:
+        st.success(f"Indexed {name}{count_part}{type_part}. No extraction issues found.")
+    if st.button("Dismiss", key="dismiss-upload-result"):
+        del st.session_state["last_upload_result"]
+        st.rerun()
+
+
 def _render_documents_tab() -> None:
+    _render_rebuild_status()
+    _render_upload_result()
+
     st.subheader("Add a document")
+    st.caption("Upload a document to add it to the knowledge base.")
+    with st.expander("ⓘ Supported formats & extraction notes"):
+        st.caption(
+            f"Supported: {', '.join(sorted(ext.lstrip('.') for ext in SUPPORTED_DOC_EXTENSIONS))}. "
+            "A document with very complex tables -- multiple header levels, or more than one logical "
+            "section combined into a single physical table -- may not extract cleanly even though it "
+            "uploads successfully; you'll get a warning below if that happens, but simpler, flatter "
+            "tables are more reliable."
+        )
+    # Keyed with a version counter, bumped on a successful add -- otherwise
+    # the uploader keeps showing the just-added file "staged" after the
+    # rerun (same stale-widget-state issue as the data_editor key fix
+    # above), which reads as if the upload never actually went through.
+    if "doc_uploader_version" not in st.session_state:
+        st.session_state.doc_uploader_version = 0
+
     uploaded_file = st.file_uploader(
         "Upload a new approved document",
         type=sorted(ext.lstrip(".") for ext in SUPPORTED_DOC_EXTENSIONS),
         label_visibility="collapsed",
+        key=f"doc-uploader-{st.session_state.doc_uploader_version}",
     )
     if uploaded_file is not None:
         target_path = APPROVED_DOCS_DIR / uploaded_file.name
@@ -165,13 +262,14 @@ def _render_documents_tab() -> None:
                 set_document_type(uploaded_file.name, doc_type)
                 with st.spinner("Indexing new document..."):
                     try:
-                        count = add_document_to_index(target_path)
+                        count, warnings = add_document_to_index(target_path)
                         rebuild_product_registry(APPROVED_DOCS_DIR)
                     except RetrieverError as e:
                         st.session_state.docs_changed_since_rebuild = True
                         st.error(f"Added the file, but indexing failed: {e}. Use Rebuild Index to retry.")
                     else:
-                        st.success(f"Added and indexed {uploaded_file.name} ({count} chunks) as {doc_type}.")
+                        st.session_state.last_upload_result = (uploaded_file.name, count, doc_type, warnings)
+                        st.session_state.doc_uploader_version += 1
                         st.rerun()
 
     st.subheader("Current documents")
@@ -179,14 +277,18 @@ def _render_documents_tab() -> None:
 
     if not doc_paths:
         st.caption("No documents in the knowledge base yet.")
-        return
 
     for doc_path in doc_paths:
         stat = doc_path.stat()
         size_kb = stat.st_size / 1024
         modified = datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M")
         current_type = get_document_type(doc_path.name)
-        col1, col2, col3 = st.columns([4, 2, 1])
+        # [3, 3, 1], not the original [4, 2, 1] -- proven necessary by
+        # direct feedback: the Type dropdown was too narrow to read its
+        # own longest options ("Golden Frameworks & Sales Tactics",
+        # "Competitive & Internal Strategy") even once a choice was
+        # already selected, let alone while open.
+        col1, col2, col3 = st.columns([3, 3, 1])
         with col1:
             st.markdown(f"**{doc_path.name}**")
             st.caption(f"{size_kb:.0f} KB · modified {modified}")
@@ -222,13 +324,13 @@ def _render_documents_tab() -> None:
                     with st.spinner("Re-indexing..."):
                         try:
                             remove_document_from_index(doc_path.name)
-                            add_document_to_index(doc_path)
+                            _, warnings = add_document_to_index(doc_path)
                             rebuild_product_registry(APPROVED_DOCS_DIR)
                         except RetrieverError as e:
                             st.session_state.docs_changed_since_rebuild = True
                             st.error(f"Saved the file, but re-indexing failed: {e}. Use Rebuild Index to retry.")
                         else:
-                            st.success("Saved and re-indexed.")
+                            st.session_state.last_upload_result = (doc_path.name, None, None, warnings)
                             st.rerun()
 
     if any(get_document_type(p.name) is None for p in doc_paths):
@@ -238,38 +340,75 @@ def _render_documents_tab() -> None:
             "pick a type for each from the dropdown."
         )
 
+    with st.expander("What does each document type feed?"):
+        for doc_type in ALL_TYPES:
+            st.markdown(f"**{doc_type}** -- {_TYPE_HELP[doc_type]}")
+            st.caption(f"Used by: {_TYPE_USED_BY[doc_type]}")
+
 
 # ---------------------------------------------------------------------------
-# Approved Claims tab -- plain reference documentation for human review;
-# nothing here is actually enforced by the assistant.
+# Approved Claims tab -- indexed alongside the real approved documents (see
+# retriever.load_and_chunk_approved_docs), so this content is retrievable
+# and can inform an answer. It's still not the same as Restricted Claims:
+# it's admin-typed text, not independently verified against the approved
+# documents, so it can't on its own satisfy a restricted-category claim
+# (pricing, certifications, safety, delivery) -- see
+# claim_checker.guardrail_source_text.
 # ---------------------------------------------------------------------------
 def _render_approved_claims_tab() -> None:
     header, bullets = load_claims(APPROVED_CLAIMS_PATH)
+
+    # A st.data_editor with a fixed key keeps its own {edited_rows,
+    # added_rows, deleted_rows} diff in session_state, keyed by row
+    # POSITION -- and that diff survives across reruns (including
+    # navigating to a different page and back, since session_state
+    # outlives any one script run). After Save writes the shorter file
+    # and reruns, the stale diff still refers to the old row positions
+    # and gets silently re-applied on top of the fresh (already-correct)
+    # data on the next render -- which is exactly what made a deleted
+    # row appear to "come back". Bumping the key on every successful
+    # save forces Streamlit to treat it as a brand-new widget with no
+    # carried-over diff, so it starts clean from the just-saved data.
+    if "approved_claims_editor_version" not in st.session_state:
+        st.session_state.approved_claims_editor_version = 0
 
     edited = st.data_editor(
         pd.DataFrame({"Claim": bullets}),
         num_rows="dynamic",
         use_container_width=True,
         hide_index=True,
-        key="editor-approved-claims",
+        key=f"editor-approved-claims-{st.session_state.approved_claims_editor_version}",
     )
 
     if st.button("Save Approved Claims", type="primary"):
         new_bullets = [str(v) for v in edited["Claim"].tolist()]
         save_claims(APPROVED_CLAIMS_PATH, header, new_bullets)
-        st.success("Saved Approved Claims.")
-        st.rerun()
+        with st.spinner("Re-indexing..."):
+            try:
+                remove_document_from_index(APPROVED_CLAIMS_PATH.name)
+                add_document_to_index(APPROVED_CLAIMS_PATH)
+            except RetrieverError as e:
+                st.session_state.docs_changed_since_rebuild = True
+                st.error(f"Saved, but indexing failed: {e}. Use Rebuild Index on the Documents tab to retry.")
+            else:
+                st.session_state.approved_claims_editor_version += 1
+                st.success("Saved Approved Claims.")
+                st.rerun()
+    # No separate "Remove a claim" selectbox+button here -- the data_editor
+    # above already supports row deletion natively (num_rows="dynamic").
 
-    if bullets:
-        st.divider()
-        col1, col2 = st.columns([4, 1])
-        to_delete = col1.selectbox(
-            "Remove a claim", bullets, key="delete-approved-claim-select", label_visibility="collapsed"
+    with st.expander("What does this page do?"):
+        st.markdown(
+            "A curated list of facts already verified against the approved product documents -- "
+            "a quick way to add a standalone fact without editing a full document. Saving here "
+            "indexes this list, so it can inform the assistant's answers, same as any other "
+            "approved document."
         )
-        if col2.button("Delete", key="delete-approved-claim-btn", use_container_width=True):
-            save_claims(APPROVED_CLAIMS_PATH, header, [b for b in bullets if b != to_delete])
-            st.success(f"Removed: {to_delete}")
-            st.rerun()
+        st.caption(
+            "It's still not the same as Restricted Claims: a claim in a restricted category "
+            "(pricing, certifications, safety, delivery) needs to be backed by a real approved "
+            "document to count as supported, not just stated here."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -310,12 +449,19 @@ def _render_restricted_claims_tab() -> None:
 
     entries = load_entries(RESTRICTED_CLAIMS_PATH)
 
+    # Bump the widget key on every save -- see _render_approved_claims_tab's
+    # comment for why a fixed key on a dynamic-rows data_editor lets a
+    # deleted row silently reappear after a save + rerun (or navigating
+    # away and back).
+    if "restricted_claims_editor_version" not in st.session_state:
+        st.session_state.restricted_claims_editor_version = 0
+
     edited = st.data_editor(
         _entries_to_rows(entries),
         num_rows="dynamic",
         use_container_width=True,
         hide_index=True,
-        key="editor-restricted-claims",
+        key=f"editor-restricted-claims-{st.session_state.restricted_claims_editor_version}",
         column_config={
             "category": st.column_config.SelectboxColumn(options=KNOWN_CATEGORIES, required=True),
             "keywords": st.column_config.TextColumn(help="Comma-separated, e.g. \"atex, atex certified\""),
@@ -328,30 +474,29 @@ def _render_restricted_claims_tab() -> None:
 
     if st.button("Save Restricted Claims", type="primary"):
         save_entries(RESTRICTED_CLAIMS_PATH, _rows_to_entries(edited))
+        st.session_state.restricted_claims_editor_version += 1
         st.success("Saved Restricted Claims. Enforcement updated immediately.")
         st.rerun()
 
-    if entries:
-        st.divider()
+    # No separate "Remove an entry" selectbox+button here -- proven
+    # redundant by direct feedback: the data_editor above already lets
+    # a row be deleted directly (num_rows="dynamic"), so a second,
+    # separate removal control duplicated that with no real benefit.
 
-        def _entry_label(i: int) -> str:
-            e = entries[i]
-            keywords = ", ".join(e.keywords[:3]) + ("..." if len(e.keywords) > 3 else "")
-            return f"{e.category} -- {keywords}"
-
-        col1, col2 = st.columns([4, 1])
-        idx = col1.selectbox(
-            "Remove an entry",
-            range(len(entries)),
-            format_func=_entry_label,
-            key="delete-restricted-select",
-            label_visibility="collapsed",
+    with st.expander("What does this page do?"):
+        st.markdown(
+            "The guardrail policy: each row is a risk **category** (Certification, Pricing, "
+            "Safety, ...) plus the **keywords** that trigger it. Whenever a question or answer "
+            "matches one of those keywords, the assistant checks whether the retrieved source "
+            "documents actually back it up."
         )
-        if col2.button("Delete", key="delete-restricted-btn", use_container_width=True):
-            remaining = [e for i, e in enumerate(entries) if i != idx]
-            save_entries(RESTRICTED_CLAIMS_PATH, remaining)
-            st.success(f"Removed: {_entry_label(idx)}")
-            st.rerun()
+        st.markdown(
+            "- Matched but **backed by a real document** -- allowed, shown with the category as a risk badge.\n"
+            "- Matched but **not backed** -- blocked from customer-facing wording.\n"
+            "- **always_unsupported** checked -- always blocked for that keyword, regardless of "
+            "any supporting text (for a flat denial, e.g. a certification MNST doesn't hold)."
+        )
+        st.caption("note is shown here only, for human context -- it isn't used for matching.")
 
 
 # ---------------------------------------------------------------------------
@@ -530,7 +675,6 @@ def _render_feedback_tab() -> None:
     reports = recent_reports()
     if not reports:
         st.caption("No active reports.")
-        return
 
     for report in reports:
         with st.container(border=True):
@@ -540,10 +684,20 @@ def _render_feedback_tab() -> None:
             if report["note"]:
                 st.caption(f"Note: {report['note']}")
             col1, col2 = st.columns(2)
-            if col1.button("Resolve", key=f"resolve-{report['id']}", use_container_width=True):
+            if col1.button(
+                "Resolve",
+                key=f"resolve-{report['id']}",
+                use_container_width=True,
+                help="Resolve marks the issue as fixed but keeps it counted in accuracy.",
+            ):
                 resolve_feedback(report["id"])
                 st.rerun()
-            if col2.button("Delete", key=f"delete-{report['id']}", use_container_width=True):
+            if col2.button(
+                "Delete",
+                key=f"delete-{report['id']}",
+                use_container_width=True,
+                help="Delete removes the report and excludes it from the accuracy calculation.",
+            ):
                 _confirm_delete_report_dialog(report["id"])
 
 
@@ -679,104 +833,348 @@ def _render_requirements_records_tab() -> None:
                 _confirm_delete_requirement_dialog(row["id"], row["customer_name"], row["company"])
 
 
+def _parse_options_text(text: str) -> dict[str, str]:
+    """"Name: description" (or just "Name" alone) per line -> {name:
+    description}, "Unknown" when no description was given -- same
+    sentinel _format_option/_selectable_segments already treat as "show
+    the bare name, nothing to add" elsewhere in this codebase."""
+    options: dict[str, str] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        name, sep, desc = line.partition(":")
+        options[name.strip()] = desc.strip() if sep else "Unknown"
+    return options
+
+
+def _options_to_text(options: dict[str, str]) -> str:
+    return "\n".join(name if desc == "Unknown" else f"{name}: {desc}" for name, desc in options.items())
+
+
+def _admin_selectable_segments(nomenclature) -> list[tuple[str, str, dict[str, str]]]:
+    """Local copy of requirements_page._selectable_segments -- every
+    nomenclature segment with real decoded values, (segment_code,
+    label, {value_code: display text}) tuples. Deliberately NOT
+    imported from app.requirements_page here -- that module is a
+    Streamlit *page* (registered as an st.Page target in
+    streamlit_app.py), and importing from a page module while a
+    DIFFERENT page (Admin) is actively rendering was the prime suspect
+    for a real, reproducible bug: selecting a product here could leave
+    the Admin page showing a mix of stale and new tab content. Whether
+    or not that theory is the exact mechanism, duplicating this small,
+    pure function avoids the cross-page import entirely, which is a
+    safe, low-cost way to rule it out."""
+    if not isinstance(nomenclature, dict):
+        return []
+    result = []
+    for seg_code, segment in nomenclature.items():
+        if isinstance(segment, NomenclatureSegment) and segment.values:
+            display = {
+                val_code: (str(v) if isinstance(v, ConcentrationRange) else str(v))
+                for val_code, v in segment.values.items()
+            }
+            result.append((seg_code, segment.label, display))
+    return result
+
+
+def _effective_product_fields(product) -> list[tuple[str, dict[str, str], bool, str]]:
+    """(label, options, is_ordering_code, field_type) for every selectable
+    field this product currently shows on the real Customer Requirements
+    form -- both real ordering-code segments (2+ documented values,
+    e.g. Output Signal) and catalogue/admin "additional" ones (e.g.
+    Range on a product where Range isn't part of the order code),
+    minus anything hidden or edited-away here. is_ordering_code is True
+    only for a real, un-edited ordering-code segment -- shown so the
+    admin knows editing it removes that position from the suggested
+    product code (see product_field_overrides.
+    is_nomenclature_label_hidden_or_edited); field_type is always
+    "select" for one of those, since it's still a real ordering code."""
+    hidden = product_field_overrides.get_hidden(product.product_name)
+    fields_override = product_field_overrides.get_fields(product.product_name)
+    result: list[tuple[str, dict[str, str], bool, str]] = []
+    for _seg_code, label, display in _admin_selectable_segments(product.nomenclature):
+        if len(display) < 2 or label in hidden or label in fields_override:
+            continue
+        result.append((label, display, True, "select"))
+    for label, field in product_field_overrides.effective_additional_params(product).items():
+        result.append((label, field.get("options", {}), False, field.get("type", "select")))
+    return result
+
+
+@st.dialog("Delete this field?")
+def _confirm_delete_product_field_dialog(product_name: str, label: str) -> None:
+    st.write(f"Delete **{label}** from {product_name}'s Customer Requirements fields? This cannot be undone.")
+    col1, col2 = st.columns(2)
+    if col1.button("Delete", type="primary", use_container_width=True):
+        product_field_overrides.remove_field(product_name, label)
+        st.rerun()
+    if col2.button("Cancel", use_container_width=True):
+        st.rerun()
+
+
+@st.dialog("Delete this field?")
+def _confirm_delete_generic_field_dialog(key: str, label: str) -> None:
+    st.write(f"Delete **{label}** from the general Customer Requirements fields? This cannot be undone.")
+    col1, col2 = st.columns(2)
+    if col1.button("Delete", type="primary", use_container_width=True):
+        fields = load_fields()
+        save_fields([f for f in fields if f["key"] != key])
+        st.rerun()
+    if col2.button("Cancel", use_container_width=True):
+        st.rerun()
+
+
+def _render_product_field_row(
+    product_name: str, label: str, options: dict[str, str], is_ordering_code: bool, field_type: str = "select"
+) -> None:
+    # Deliberately NO st.container(border=True) wrapper, and label +
+    # options collapsed into one markdown call instead of separate
+    # markdown/caption/caption calls -- proven necessary by direct
+    # feedback: the original, more deeply-nested per-row layout (a
+    # bordered container, 3 columns, 2-3 text elements each) pushed this
+    # page's total element count high enough that switching AWAY from
+    # this tab to a totally different one (e.g. Approved Claims) could
+    # leave that OTHER tab's real content sitting alongside orphaned,
+    # not-cleaned-up DOM from whatever tab was active before -- a
+    # Streamlit/React reconciliation issue tied to the SIZE of what
+    # changes in one rerun, not anything specific to this tab's logic.
+    # Fewer elements per row keeps the whole page's rerun delta smaller.
+    edit_key = f"editing-product-{product_name}-{label}"
+    editing = st.session_state.get(edit_key, False)
+    if not editing:
+        col1, col2, col3 = st.columns([3, 1, 1])
+        code_note = " *(ordering code)*" if is_ordering_code else ""
+        opts_note = f" -- {', '.join(options.keys())}" if options else ""
+        col1.markdown(f"**{label}**{code_note} -- {field_type}{opts_note}")
+        if col2.button("Edit", key=f"edit-btn-product-{product_name}-{label}", use_container_width=True):
+            st.session_state[edit_key] = True
+            st.rerun()
+        if col3.button("Delete", key=f"del-btn-product-{product_name}-{label}", use_container_width=True):
+            _confirm_delete_product_field_dialog(product_name, label)
+    else:
+        with st.form(f"edit-form-product-{product_name}-{label}"):
+            new_type = st.selectbox(
+                "Type", FIELD_TYPES, index=FIELD_TYPES.index(field_type) if field_type in FIELD_TYPES else 0
+            )
+            new_options_text = st.text_area(
+                "Options",
+                value=_options_to_text(options),
+                height=120,
+            )
+            st.caption("One per line. Add Option name: description if needed.")
+            save_col, cancel_col = st.columns(2)
+            save = save_col.form_submit_button("Save", type="primary", use_container_width=True)
+            cancel = cancel_col.form_submit_button("Cancel", use_container_width=True)
+        if save:
+            new_options = _parse_options_text(new_options_text)
+            if new_type in ("select", "multiselect", "radio") and not new_options:
+                st.error("Enter at least one option.")
+            else:
+                product_field_overrides.set_field(product_name, label, new_options, new_type)
+                st.session_state[edit_key] = False
+                st.success("Saved.")
+                st.rerun()
+        if cancel:
+            st.session_state[edit_key] = False
+            st.rerun()
+
+
+def _render_generic_field_row(field: dict) -> None:
+    # Same flattened, no-bordered-container layout as
+    # _render_product_field_row -- see its comment for why.
+    key = field["key"]
+    edit_key = f"editing-generic-{key}"
+    editing = st.session_state.get(edit_key, False)
+    if not editing:
+        col1, col2, col3 = st.columns([3, 1, 1])
+        hidden_tag = " *(hidden)*" if not field.get("visible", True) else ""
+        type_line = field.get("type", "text")
+        if field.get("options"):
+            type_line += " -- " + ", ".join(field["options"])
+        col1.markdown(f"**{field['label']}**{hidden_tag} -- {type_line}")
+        if col2.button("Edit", key=f"edit-btn-generic-{key}", use_container_width=True):
+            st.session_state[edit_key] = True
+            st.rerun()
+        # A core field's widget is hardcoded in requirements_page.py
+        # (not generated from this list), so deleting the row
+        # wouldn't remove it from the form, only reset its label
+        # back to default and silently re-show it -- hiding
+        # (visible=False, row kept) is the only real removal for one
+        # of these. A custom field has no such widget to fall back
+        # to, so it's deleted outright.
+        delete_label = "Hide" if field.get("core") else "Delete"
+        if col3.button(delete_label, key=f"del-btn-generic-{key}", use_container_width=True):
+            if field.get("core"):
+                # Reversible (just sets visible=False, un-hide via Edit's
+                # "Visible" checkbox) -- no confirmation needed.
+                fields = load_fields()
+                save_fields([{**f, "visible": False} if f["key"] == key else f for f in fields])
+                st.rerun()
+            else:
+                _confirm_delete_generic_field_dialog(key, field["label"])
+    else:
+        with st.form(f"edit-form-generic-{key}"):
+            new_label = st.text_input("Label", value=field["label"])
+            new_type = st.selectbox(
+                "Type", FIELD_TYPES, index=FIELD_TYPES.index(field.get("type", "text"))
+            )
+            new_options = st.text_input(
+                "Options (comma-separated -- only used for select / multiselect / radio)",
+                value=", ".join(field.get("options") or []),
+            )
+            new_required = st.checkbox("Required", value=field.get("required", False))
+            new_visible = st.checkbox("Visible", value=field.get("visible", True))
+            save_col, cancel_col = st.columns(2)
+            save = save_col.form_submit_button("Save", type="primary", use_container_width=True)
+            cancel = cancel_col.form_submit_button("Cancel", use_container_width=True)
+        if save:
+            label = new_label.strip()
+            if not label:
+                st.error("Label can't be empty.")
+            else:
+                options_list = [o.strip() for o in new_options.split(",") if o.strip()]
+                fields = load_fields()
+                save_fields([
+                    {
+                        **f, "label": label, "type": new_type, "options": options_list,
+                        "required": new_required, "visible": new_visible,
+                    } if f["key"] == key else f
+                    for f in fields
+                ])
+                st.session_state[edit_key] = False
+                st.success("Saved.")
+                st.rerun()
+        if cancel:
+            st.session_state[edit_key] = False
+            st.rerun()
+
+
 def _render_requirements_form_fields_tab() -> None:
     st.caption(
-        "Edit the Customer Requirements page's generic questions -- label, options, whether it's "
-        "required, and whether it's shown at all. Changes take effect immediately, no restart needed. "
-        "Built-in fields (Industry / Use Case, Certifications, etc.) can be renamed, relabeled, or "
-        "hidden, but not deleted outright -- they're tied to real stored data or logic elsewhere. "
-        "Add a new row for a brand-new field; leave its Key blank, it's generated from the Label. "
-        "Customer Name/Company aren't edited here -- they come from the Deal picker at the top of the "
-        "page. Per-product ordering options (Output Signal, Range, Background, etc.) aren't edited "
-        "here either -- those come straight from the approved product catalogues."
+        "Edit the fields used in Customer Requirements. Product-specific changes are saved as "
+        "overrides and survive index rebuilds."
     )
+    with st.expander("How this works"):
+        st.caption(
+            "Covers both each product's own selectable specs (Output Signal, Range, Background, "
+            "etc.) and the generic questions below (Industry, Certifications, etc.). Changes take "
+            "effect immediately, no restart needed. A product-specific edit lives in its own file "
+            "that survives a Rebuild Index -- data/product_registry.json itself gets fully "
+            "regenerated from the catalogues on every rebuild, so editing it directly would just "
+            "get overwritten."
+        )
 
-    fields = load_fields()
-    df = pd.DataFrame(
-        [
-            {
-                "key": f["key"],
-                "label": f["label"],
-                "type": f.get("type", "text"),
-                "options": ", ".join(f.get("options") or []),
-                "required": bool(f.get("required", False)),
-                "visible": bool(f.get("visible", True)),
-            }
-            for f in fields
-        ]
-    )
+    try:
+        products, _ = load_product_index()
+    except (FileNotFoundError, OSError):
+        products = []
 
-    edited = st.data_editor(
-        df,
-        num_rows="dynamic",
-        use_container_width=True,
-        hide_index=True,
-        key="editor-requirements-fields",
-        column_config={
-            "key": st.column_config.TextColumn(
-                help="Auto-generated from the label for a new field -- leave blank.", disabled=True
-            ),
-            "type": st.column_config.SelectboxColumn(options=FIELD_TYPES, required=True),
-            "options": st.column_config.TextColumn(
-                help="Comma-separated -- only used for select / multiselect / radio fields."
-            ),
-            "required": st.column_config.CheckboxColumn(),
-            "visible": st.column_config.CheckboxColumn(
-                help="Unchecked = not shown on the form. A built-in field whose row is deleted here "
-                "is kept and hidden instead of removed."
-            ),
-        },
-    )
+    if products:
+        product_names = [p.product_name for p in products]
+        selected_name = st.selectbox(
+            "Product (admin)", product_names, key="ADMIN_PAGE_PRODUCT_FIELD_SELECTOR_UNIQUE_9f3a"
+        )
+        selected = next(p for p in products if p.product_name == selected_name)
 
-    if st.button("Save Form Fields", type="primary"):
-        existing_by_key = {f["key"]: f for f in fields}
-        edited_fields = []
-        seen_keys: set[str] = set()
-        for row in edited.itertuples(index=False):
-            label = str(row.label).strip()
+        st.markdown(f"**{selected_name}'s selectable fields**")
+        product_fields = _effective_product_fields(selected)
+        if not product_fields:
+            st.caption("No selectable fields for this product yet.")
+        for label, options, is_ordering_code, field_type in product_fields:
+            _render_product_field_row(selected_name, label, options, is_ordering_code, field_type)
+
+        st.markdown(f"**Add a field to {selected_name}**")
+        with st.form(f"add-product-field-{selected_name}", clear_on_submit=True):
+            col1, col2 = st.columns(2)
+            new_label = col1.text_input("Label", key=f"new-product-field-label-{selected_name}")
+            new_type = col2.selectbox("Type", FIELD_TYPES, key=f"new-product-field-type-{selected_name}")
+            new_options_text = st.text_area(
+                "Options",
+                height=100,
+                key=f"new-product-field-options-{selected_name}",
+            )
+            st.caption("One per line. Add Option name: description if needed.")
+            add_submitted = st.form_submit_button("Add Field", type="primary")
+        if add_submitted:
+            label = new_label.strip()
+            existing_labels = {l for l, _, _, _ in product_fields}
             if not label:
-                continue
-            key = unique_key(label, str(row.key or ""), seen_keys)
-            seen_keys.add(key)
-            options = [o.strip() for o in str(row.options).split(",") if o.strip()] if row.options else []
-            edited_fields.append(
+                st.error("Enter a label.")
+            elif label in existing_labels:
+                st.error(f"\"{label}\" already exists for this product -- edit it above instead.")
+            else:
+                options = _parse_options_text(new_options_text)
+                if new_type in ("select", "multiselect", "radio") and not options:
+                    st.error("Enter at least one option.")
+                else:
+                    product_field_overrides.set_field(selected_name, label, options, new_type)
+                    st.success(f"Added \"{label}\" to {selected_name}.")
+                    st.rerun()
+    else:
+        st.caption("No products in the registry yet -- add a Product Catalogue document first.")
+
+    st.divider()
+    st.markdown("**General fields** (not tied to a specific product)")
+    st.caption(
+        "Customer Name/Company aren't listed here -- they come from the Deal picker at the top of "
+        "the page, not this list."
+    )
+    fields = load_fields()
+    for field in fields:
+        _render_generic_field_row(field)
+
+    st.markdown("**Add a general field**")
+    with st.form("add-requirement-field-form", clear_on_submit=True):
+        col1, col2 = st.columns(2)
+        new_label = col1.text_input("Label")
+        new_type = col2.selectbox("Type", FIELD_TYPES)
+        new_options = st.text_input(
+            "Options (comma-separated -- only used for select / multiselect / radio)"
+        )
+        new_required = st.checkbox("Required")
+        add_submitted = st.form_submit_button("Add Field", type="primary")
+    if add_submitted:
+        label = new_label.strip()
+        if not label:
+            st.error("Enter a label for the new field.")
+        else:
+            options = [o.strip() for o in new_options.split(",") if o.strip()]
+            key = unique_key(label, "", {f["key"] for f in fields})
+            save_fields([
+                *fields,
                 {
                     "key": key,
                     "label": label,
-                    "type": row.type,
+                    "type": new_type,
                     "options": options,
-                    "required": bool(row.required),
-                    "visible": bool(row.visible),
-                    "core": existing_by_key.get(key, {}).get("core", False),
-                }
-            )
-        save_fields(merge_core_fields(edited_fields))
-        st.success("Saved. The Customer Requirements page reflects this immediately.")
-        st.rerun()
-
-    custom_fields = [f for f in fields if not f.get("core")]
-    if custom_fields:
-        st.divider()
-        col1, col2 = st.columns([4, 1])
-        to_delete = col1.selectbox(
-            "Remove a custom field",
-            [f["key"] for f in custom_fields],
-            format_func=lambda k: next(f["label"] for f in custom_fields if f["key"] == k),
-            key="delete-req-field-select",
-            label_visibility="collapsed",
-        )
-        if col2.button("Delete", key="delete-req-field-btn", use_container_width=True):
-            save_fields([f for f in fields if f["key"] != to_delete])
-            st.success("Removed.")
+                    "required": new_required,
+                    "visible": True,
+                    "core": False,
+                },
+            ])
+            st.success(f"Added \"{label}\".")
             st.rerun()
 
 
 def _render_requirements_admin_tab() -> None:
-    records_tab, fields_tab = st.tabs(["Submitted Requirements", "Form Fields"])
-    with records_tab:
+    # No nested st.tabs() here -- proven necessary by direct feedback:
+    # a SECOND, inner st.tabs() nested inside this outer 6-tab group's
+    # own "Customer Requirements" tab was fragile in a way a single
+    # level of tabs isn't -- interacting with a widget deep inside the
+    # inner tabs (e.g. the Product picker below) could leave the page
+    # showing a completely different OUTER tab's content (e.g.
+    # "Documents") while "Customer Requirements" still showed as the
+    # visually active tab label. An st.fragment was tried as a fix and
+    # made it worse (real content bleeding between tabs, not just a
+    # timing flash), so it was reverted. Flattening to one level of
+    # tabs removes the specific nested-tabs interaction entirely.
+    # Submitted Requirements now lives in a collapsed expander instead
+    # of its own inner tab.
+    with st.expander(f"Submitted Requirements ({len(list_requirements())})"):
         _render_requirements_records_tab()
-    with fields_tab:
-        _render_requirements_form_fields_tab()
+    st.divider()
+    _render_requirements_form_fields_tab()
 
 
 # ---------------------------------------------------------------------------
@@ -790,10 +1188,9 @@ def render_admin_page() -> None:
     st.title("Admin")
     st.caption("Document management, index rebuilds, and claim policy editing.")
 
-    _render_rebuild_status()
-
     documents_tab, approved_tab, restricted_tab, feedback_tab, deals_tab, requirements_tab = st.tabs(
-        ["Documents", "Approved Claims", "Restricted Claims", "Feedback", "Deals", "Customer Requirements"]
+        ["Documents", "Approved Claims", "Restricted Claims", "Feedback", "Deals", "Customer Requirements"],
+        key="admin-main-tabs",
     )
 
     with documents_tab:

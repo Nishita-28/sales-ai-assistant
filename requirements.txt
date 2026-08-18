@@ -1,4 +1,4 @@
-streamlit
+streamlit>=1.60.0
 pyyaml
 python-dotenv
 pandas

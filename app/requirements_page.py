@@ -17,6 +17,7 @@ import re
 import pandas as pd
 import streamlit as st
 
+from app import product_field_overrides
 from app.concentration import ConcentrationRange, parse_concentration_range
 from app.deal_picker import render_deal_picker, set_active_deal
 from app.product_index import NomenclatureSegment, ProductIndexEntry, load_product_index
@@ -257,6 +258,16 @@ def render_requirements_page() -> None:
     fixed_segments: list[tuple[str, str]] = []
     if selected_product is not None:
         for seg_code, label, display in _selectable_segments(selected_product.nomenclature):
+            # Hidden or edited via Admin -- see
+            # product_field_overrides.is_nomenclature_label_hidden_or_edited.
+            # Hidden means suppressed everywhere; edited means it's
+            # rendered further down instead (with the admin's own
+            # options), via effective_additional_params, not as an
+            # ordering-code dropdown here.
+            if product_field_overrides.is_nomenclature_label_hidden_or_edited(
+                selected_product.product_name, label
+            ):
+                continue
             if len(display) >= 2:
                 choosable_segments.append((seg_code, label, display))
             elif display:
@@ -328,6 +339,59 @@ def render_requirements_page() -> None:
                 # here so nothing is actually hidden from the rep.
                 if value != "Unknown" and _short_option_text(value) != _normalize_value_text(value):
                     st.caption(f"**{label} {code}**: {_normalize_value_text(value)}")
+
+    # Selectable specs the product documents with their own "Selectable
+    # <X>" table but that have NO position in its ordering-code suffix
+    # at all -- e.g. VISION H2 LD's Range/Background Gas/Compatible
+    # Interfaces/Connector Option (only Output Signal is actually part
+    # of its order code). Same rendering treatment as the ordering
+    # options above, appended into the same segment_summaries list so
+    # they flow into the saved requirement the same way -- kept as a
+    # clearly separate block, though, so a product where a label like
+    # "Range" happens to be a REAL ordering-code segment never shows it
+    # twice: the registry guarantees a label appears in nomenclature
+    # (-> choosable_segments, above) XOR additional_selectable_parameters
+    # (-> here), never both, for the same product.
+    additional_params = (
+        product_field_overrides.effective_additional_params(selected_product)
+        if selected_product is not None else {}
+    )
+    if additional_params:
+        st.caption(f"{product_choice}'s other selectable specifications:")
+        for label, field in additional_params.items():
+            ftype = field.get("type", "select")
+            display = field.get("options", {})
+            key = f"addl-{label}"
+            if ftype in ("select", "multiselect", "radio"):
+                option_labels = [_format_option(name, _short_option_text(val)) for name, val in display.items()]
+                label_to_name = dict(zip(option_labels, display.keys()))
+                if ftype == "select":
+                    chosen = st.selectbox(f"Select {label}", [NOT_SURE] + option_labels, key=key)
+                    chosen_names = [label_to_name[chosen]] if chosen != NOT_SURE else []
+                elif ftype == "multiselect":
+                    chosen_list = st.multiselect(f"Select {label}", option_labels, key=key)
+                    chosen_names = [label_to_name[c] for c in chosen_list]
+                else:
+                    chosen = st.radio(f"Select {label}", option_labels, key=key, horizontal=True) if option_labels else None
+                    chosen_names = [label_to_name[chosen]] if chosen else []
+                for name in chosen_names:
+                    value = display[name]
+                    summary = f"{label}: {name}" if value == "Unknown" else f"{label}: {value} ({name})"
+                    segment_summaries.append(summary)
+                    if value != "Unknown" and _short_option_text(value) != _normalize_value_text(value):
+                        st.caption(f"**{label} {name}**: {_normalize_value_text(value)}")
+            elif ftype == "textarea":
+                value = st.text_area(label, height=80, key=key)
+                if value:
+                    segment_summaries.append(f"{label}: {value}")
+            elif ftype == "number":
+                value = st.number_input(label, value=0.0, key=key)
+                if value:
+                    segment_summaries.append(f"{label}: {value}")
+            else:
+                value = st.text_input(label, key=key)
+                if value:
+                    segment_summaries.append(f"{label}: {value}")
 
     # Every generic (non-nomenclature) question below is admin-editable
     # from the "Customer Requirements" tab in Admin (label, options,

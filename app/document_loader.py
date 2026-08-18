@@ -403,6 +403,28 @@ def check_table_coverage(block: dict[str, Any]) -> list[str]:
     return sorted(missing)
 
 
+# A real column/segment header is a short label -- a few words at most. A
+# name this long is a strong signal the multi-row-header detector
+# (_detect_header_row_count / _row_extends_header) merged unrelated body
+# text into what it thinks is a header row, rather than that literal text
+# actually dropping (check_table_coverage passes cleanly in this case --
+# every character is still present, just organized wrong). Proven on a
+# real approved catalogue: a table's real header ("Selectable Range")
+# got replaced by a ~300-character footnote paragraph, repeated as the
+# "name" of every column, silently burying the real values (Range 1/2/3/4)
+# as if they were themselves data under that footnote. Not a proof the
+# header is wrong -- a table could legitimately have a long name -- but
+# cheap, high-signal, and worth a human's attention rather than silently
+# shipping it.
+_MAX_REASONABLE_COLUMN_NAME_LENGTH = 100
+
+
+def check_table_structure(block: dict[str, Any]) -> list[str]:
+    """Flags column/segment names that are implausibly long for a real
+    header. keyvalue-style tables have no column-name concept to check."""
+    return [name for name in block.get("columns", []) if len(name) > _MAX_REASONABLE_COLUMN_NAME_LENGTH]
+
+
 def _build_table_block(
     grid: list[list[str]], is_bold_fn: IsBoldFn, table_index: int, section_title: str
 ) -> dict[str, Any]:
@@ -430,6 +452,10 @@ def _build_table_block(
     dropped = check_table_coverage(block)
     if dropped:
         block["dropped_cells"] = dropped
+
+    suspicious = check_table_structure(block)
+    if suspicious:
+        block["suspicious_columns"] = suspicious
 
     return block
 
@@ -817,26 +843,236 @@ def extract_csv_blocks(file_path: str | Path) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# XLSX -- one table block per worksheet, with real bold formatting available.
+# XLSX title/table-region detection -- a leading row above a real table
+# (a report title, a subtitle, a section label) is common in real-world
+# spreadsheets and was previously silently misread as if it were the
+# header row itself, corrupting every column name below it. Confirmed on
+# the real, currently-approved Historical Sales workbook: "Client and
+# Project Details for Work Executed in since April 2022" became the name
+# of column 2, and every real column -- FY, Company Name, Sector,
+# Purpose, Location, Use Case -- was lost, replaced by generic "Column N"
+# labels on every single data row.
+#
+# Deliberately NOT a "sparse row = title" rule -- proven too risky by
+# testing: a row with exactly one populated cell can just as easily be
+# real, legitimate data (e.g. a narrow table whose first column repeats
+# the same category value down every row, like "MNST" labeling several
+# of MNST's own product rows). Two independent, stricter signals must
+# BOTH agree before a row is ever reclassified out of the table body:
+#
+# 1. Coverage gap against the table's own "core columns" (the columns
+#    populated in every row of a genuinely consistent, regular block) --
+#    a candidate row must populate at most _MAX_TITLE_POPULATED_CORE_
+#    COLUMNS of them. An absolute count, not a percentage: a percentage
+#    threshold doesn't generalize across table widths (a real title in a
+#    narrow 3-column table leaves only 2 of 3 columns empty -- 67%, while
+#    the same kind of title in an 8-column table leaves 87% empty; a
+#    single fixed percentage bar can't fit both).
+# 2. Non-recurrence -- none of the candidate row's populated core-column
+#    values may reappear in that same column anywhere in the table body.
+#    A title is a one-off label; real row data recurs. This is what
+#    correctly leaves a repeating "MNST" row alone instead of discarding
+#    it.
+#
+# A row that doesn't clearly satisfy both stays exactly where it is --
+# left ambiguous and untouched, still the literal first row of the table
+# exactly like before this mechanism existed. This can misjudge a real
+# title as ordinary data (e.g. a two-row grouped header, tested and
+# confirmed left alone), but it can never misjudge real data as a title
+# and throw it away, which is the failure mode that actually matters for
+# a knowledge base an AI answers questions from.
 # ---------------------------------------------------------------------------
 
-def _read_xlsx_sheet_grid(worksheet) -> tuple[list[list[str]], list[list[Any]]]:
-    """Returns (text_grid, cell_rows), dropping blank rows while keeping
-    bold formatting lookups intact."""
+# How many consecutive rows must share a consistent set of populated
+# columns before that's trusted as "a real table starts here" rather than
+# coincidence.
+_TABLE_REGION_WINDOW = 3
+
+# A real table's core columns are the ones populated in every row of that
+# consistent block; a candidate leading row must leave at least half of
+# them empty to even be considered for title reclassification.
+_TABLE_REGION_MIN_CORE_FRACTION = 0.5
+
+_MAX_TITLE_POPULATED_CORE_COLUMNS = 1
+
+
+def _find_table_region_start(
+    rows: list[list[str]],
+    window: int = _TABLE_REGION_WINDOW,
+    min_core_frac: float = _TABLE_REGION_MIN_CORE_FRACTION,
+) -> tuple[int, set[int], bool]:
+    """Scans forward for the first index where `window` consecutive rows
+    share a consistent, substantial set of populated columns -- trusted
+    as where a real table begins. Returns (start_index, core_columns,
+    found); found=False means no such consistent region was located
+    (e.g. too few rows), and the other two values fall back to row 0
+    as-is -- the same, un-analyzed behavior this file always had.
+
+    The "how wide should a real table be" yardstick is the widest
+    POPULATED row count anywhere in `rows`, not len(rows[0]) -- proven
+    necessary by testing against the real, currently-approved Historical
+    Sales workbook: openpyxl reports that sheet's width as 20 columns
+    (old formatting left over on cells that were never really used),
+    while only 7 columns ever actually hold data anywhere in it. Measured
+    against the nominal 20-wide dimension, no real row could ever reach
+    the half-of-width core-size bar, so detection silently failed across
+    the whole sheet and fell back to today's original, broken behavior.
+    A real row's own widest populated count is immune to that -- it
+    reflects what the sheet's data actually looks like, not leftover
+    formatting metadata."""
+    n = len(rows)
+    if n == 0:
+        return 0, set(), False
+    real_width = max((sum(1 for c in row if c) for row in rows), default=0)
+    for h in range(n):
+        group = rows[h : h + window]
+        # A single-row "group" trivially intersects with itself, which is
+        # no corroboration at all -- never accept fewer than 2 rows of
+        # agreement, even if the sheet is running out of rows to check.
+        if len(group) < min(window, 2):
+            break
+        col_sets = [{i for i, c in enumerate(r) if c} for r in group]
+        core = set.intersection(*col_sets) if col_sets else set()
+        if len(core) >= max(2, real_width * min_core_frac):
+            return h, core, True
+    return 0, {i for i, c in enumerate(rows[0]) if c}, False
+
+
+def _classify_leading_title_rows(
+    rows: list[list[str]],
+    table_start: int,
+    core_columns: set[int],
+    max_populated_core: int = _MAX_TITLE_POPULATED_CORE_COLUMNS,
+) -> list[int]:
+    """Walks backward from table_start, reclassifying a leading row as a
+    confident title only when it satisfies both signals described above.
+    Stops at the first row that fails either check -- every row from
+    there up stays part of the table body, ambiguous and untouched."""
+    confident_titles: list[int] = []
+    for r in range(table_start - 1, -1, -1):
+        row = rows[r]
+        populated_core = {i for i, c in enumerate(row) if c} & core_columns
+        recurs = any(
+            rows[body_row][col] == row[col]
+            for col in populated_core
+            for body_row in range(table_start, len(rows))
+        )
+        if len(populated_core) <= max_populated_core and not recurs:
+            confident_titles.append(r)
+        else:
+            break
+    confident_titles.reverse()
+    return confident_titles
+
+
+class _XlsxRegion:
+    """One logical unit within a worksheet: an optional run of confident
+    title rows, plus the table body they sit above. rows/cell_rows cover
+    just this region -- index 0 is the region's own first row, whether
+    that's a title row or the table itself."""
+
+    __slots__ = ("rows", "cell_rows", "title_row_indexes", "table_start")
+
+    def __init__(
+        self, rows: list[list[str]], cell_rows: list[list[Any]], title_row_indexes: list[int], table_start: int
+    ) -> None:
+        self.rows = rows
+        self.cell_rows = cell_rows
+        self.title_row_indexes = title_row_indexes
+        self.table_start = table_start
+
+
+def _segment_xlsx_grid(
+    rows: list[list[str]], cell_rows: list[list[Any]], gap_before: list[bool]
+) -> list["_XlsxRegion"]:
+    """Splits a worksheet's rows into one or more regions at blank-row
+    gaps -- proven necessary by testing: a sheet can legitimately hold
+    several separate tables (a title, a table, blank rows, another
+    title, another table), and treating the whole sheet as a single
+    table silently buried the second table's real header inside the
+    first table's data rows, as if it were just another entry.
+    A blank gap only becomes a real boundary once the rows before it
+    already form a genuine, self-sufficient table on their own (i.e.
+    _find_table_region_start succeeds within that chunk alone) --
+    otherwise those rows are merged forward into the next chunk instead
+    of being finalized as their own title-only, tableless region. Also
+    proven necessary: without this, a title+subtitle pair sitting above
+    its own table across a blank spacer row -- the exact shape of the
+    real, currently-approved Historical Sales workbook -- gets wrongly
+    split into two pieces, destroying the very case this mechanism
+    exists to fix."""
+    raw_chunks: list[tuple[list[list[str]], list[list[Any]]]] = []
+    cur_rows, cur_cells = [rows[0]], [cell_rows[0]]
+    for i in range(1, len(rows)):
+        if gap_before[i]:
+            raw_chunks.append((cur_rows, cur_cells))
+            cur_rows, cur_cells = [], []
+        cur_rows.append(rows[i])
+        cur_cells.append(cell_rows[i])
+    raw_chunks.append((cur_rows, cur_cells))
+
+    regions: list[_XlsxRegion] = []
+    pending_rows: list[list[str]] = []
+    pending_cells: list[list[Any]] = []
+    for chunk_rows, chunk_cells in raw_chunks:
+        combined_rows = pending_rows + chunk_rows
+        combined_cells = pending_cells + chunk_cells
+        table_start, core, found = _find_table_region_start(combined_rows)
+        if found:
+            titles = _classify_leading_title_rows(combined_rows, table_start, core)
+            # table_start from _find_table_region_start is only the right
+            # slice point when rows above it were actually confirmed as
+            # titles -- proven necessary by testing: a two-row grouped
+            # header (a real, meaningful row, correctly left out of
+            # `titles`) was being silently excluded from the output
+            # entirely, because the code kept slicing at the detected
+            # region-start index regardless of whether anything above it
+            # had actually been confirmed as a title. When titles is
+            # empty, nothing was confidently reclassified, so the whole
+            # region -- starting at its own row 0 -- is the table.
+            effective_start = (max(titles) + 1) if titles else 0
+            regions.append(_XlsxRegion(combined_rows, combined_cells, titles, effective_start))
+            pending_rows, pending_cells = [], []
+        else:
+            pending_rows, pending_cells = combined_rows, combined_cells
+    if pending_rows:
+        # Nothing ever followed to complete it -- surface as-is (treat
+        # row 0 as the header, today's exact pre-existing behavior)
+        # rather than silently drop it.
+        regions.append(_XlsxRegion(pending_rows, pending_cells, [], 0))
+    return regions
+
+
+# ---------------------------------------------------------------------------
+# XLSX -- one or more table blocks per worksheet, with real bold
+# formatting available.
+# ---------------------------------------------------------------------------
+
+def _read_xlsx_sheet_grid(worksheet) -> tuple[list[list[str]], list[list[Any]], list[bool]]:
+    """Returns (text_grid, cell_rows, gap_before), dropping blank rows
+    while keeping bold formatting lookups intact. gap_before[i] is True
+    when text_grid[i] was preceded by one or more dropped blank rows --
+    used by _segment_xlsx_grid to detect separate tables on one sheet."""
     text_rows: list[list[str]] = []
     cell_rows: list[list[Any]] = []
+    gap_before: list[bool] = []
+    pending_gap = False
 
     for row in worksheet.iter_rows(values_only=False):
         texts = [_clean_text(str(cell.value)) if cell.value is not None else "" for cell in row]
         if any(texts):
             text_rows.append(texts)
             cell_rows.append(list(row))
+            gap_before.append(pending_gap)
+            pending_gap = False
+        else:
+            pending_gap = True
 
     max_len = max((len(row) for row in text_rows), default=0)
     for row in text_rows:
         row.extend([""] * (max_len - len(row)))
 
-    return text_rows, cell_rows
+    return text_rows, cell_rows, gap_before
 
 
 def _cell_is_bold_xlsx(cell_rows: list[list[Any]], row_idx: int, col_idx: int) -> bool:
@@ -847,8 +1083,12 @@ def _cell_is_bold_xlsx(cell_rows: list[list[Any]], row_idx: int, col_idx: int) -
 
 
 def extract_xlsx_blocks(file_path: str | Path) -> list[dict[str, Any]]:
-    """One table block per worksheet, reading computed values rather than
-    formula text."""
+    """One or more blocks per worksheet, reading computed values rather
+    than formula text. A confidently-detected title row (see
+    _classify_leading_title_rows) becomes its own heading block -- text
+    preserved, never discarded, just no longer misread as column
+    headers -- and each self-sufficient table region (see
+    _segment_xlsx_grid) becomes its own table block."""
     from openpyxl import load_workbook
 
     path = Path(file_path)
@@ -861,19 +1101,36 @@ def extract_xlsx_blocks(file_path: str | Path) -> list[dict[str, Any]]:
 
     for sheet_name in workbook.sheetnames:
         worksheet = workbook[sheet_name]
-        grid, cell_rows = _read_xlsx_sheet_grid(worksheet)
+        grid, cell_rows, gap_before = _read_xlsx_sheet_grid(worksheet)
         if not grid:
             continue
 
-        is_bold_fn = lambda r, c, cr=cell_rows: _cell_is_bold_xlsx(cr, r, c)
-        block = _build_table_block(grid, is_bold_fn, table_index, sheet_name)
-        block["metadata"] = {
-            "filename": filename, "block_index": block_index, "section_title": sheet_name,
-            "table_index": table_index, "num_rows": len(grid), "num_columns": len(grid[0]) if grid else 0,
-        }
-        blocks.append(block)
-        table_index += 1
-        block_index += 1
+        for region in _segment_xlsx_grid(grid, cell_rows, gap_before):
+            for title_idx in region.title_row_indexes:
+                title_text = next((c for c in region.rows[title_idx] if c), "")
+                if not title_text:
+                    continue
+                blocks.append({
+                    "type": "heading",
+                    "text": title_text,
+                    "metadata": {"filename": filename, "block_index": block_index, "section_title": sheet_name},
+                })
+                block_index += 1
+
+            table_rows = region.rows[region.table_start :]
+            table_cells = region.cell_rows[region.table_start :]
+            if not table_rows:
+                continue
+            is_bold_fn = lambda r, c, cr=table_cells: _cell_is_bold_xlsx(cr, r, c)
+            block = _build_table_block(table_rows, is_bold_fn, table_index, sheet_name)
+            block["metadata"] = {
+                "filename": filename, "block_index": block_index, "section_title": sheet_name,
+                "table_index": table_index, "num_rows": len(table_rows),
+                "num_columns": len(table_rows[0]) if table_rows else 0,
+            }
+            blocks.append(block)
+            table_index += 1
+            block_index += 1
 
     return blocks
 
@@ -1137,6 +1394,14 @@ def load_document(file_path: str | Path, verbose: bool = True) -> dict[str, Any]
                 warnings.append(
                     f"Table {t_idx + 1} in {path.name}: possibly dropped cells "
                     f"{block['dropped_cells']}"
+                )
+            if block.get("suspicious_columns"):
+                worst = max(block["suspicious_columns"], key=len)
+                preview = worst[:80] + ("..." if len(worst) > 80 else "")
+                warnings.append(
+                    f"Table {t_idx + 1} in {path.name}: header detection may have misfired -- "
+                    f"found an unusually long column name ({len(worst)} characters, starts "
+                    f"with \"{preview}\"). This table's structure may need manual review."
                 )
         else:
             readable_parts.append(block["text"])

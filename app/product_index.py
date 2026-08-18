@@ -56,7 +56,16 @@ class ProductIndexEntry:
     answer "what is this" and "which catalogue documents it" without
     retrieval. Fields that couldn't be confidently extracted are the
     literal string "Unknown", never a guess (see the registry-builder
-    script's vocabulary-matching rules)."""
+    script's vocabulary-matching rules).
+
+    additional_selectable_parameters holds real, documented selectable
+    specs (e.g. VISION H2 LD's Range, Background Gas, Compatible
+    Interfaces, Connector Option) that have NO position in the product's
+    own ordering-code suffix at all -- {label: {option name: description}}
+    -- kept separate from `nomenclature` (which only ever represents
+    literal positions in the order code) rather than folding them in,
+    since a caller reconstructing a real order code from `nomenclature`
+    must never accidentally include one of these in it."""
 
     product_name: str
     family: str
@@ -67,6 +76,7 @@ class ProductIndexEntry:
     source_catalogue: str
     aliases: tuple[str, ...]
     nomenclature: Nomenclature
+    additional_selectable_parameters: dict[str, dict[str, str]]
 
 
 def _parse_concentration(d: dict[str, float]) -> HydrogenConcentration:
@@ -116,6 +126,9 @@ def load_product_index(path: Path = REGISTRY_PATH) -> tuple[list[ProductIndexEnt
             source_catalogue=p["source_catalogue"],
             aliases=tuple(p["aliases"]),
             nomenclature=_parse_nomenclature(p["nomenclature"]),
+            # .get, not [] -- a registry built before this field existed
+            # won't have it at all.
+            additional_selectable_parameters=p.get("additional_selectable_parameters", {}),
         )
         for p in data["products"]
     ]
