@@ -1,0 +1,8 @@
+[server]
+# Serves app/static/* over plain HTTP (app/static/background.png etc.)
+# instead of embedding files as base64 inside injected CSS -- confirmed
+# by testing that base64-inlining a ~1.7MB image into every page's
+# stylesheet (re-sent on every Streamlit rerun, not just once) made cold
+# starts take minutes instead of seconds. A real static file is fetched
+# once and cached by the browser like any normal asset.
+enableStaticServing = true

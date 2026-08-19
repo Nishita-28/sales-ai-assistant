@@ -1,6 +1,16 @@
-"""Reads and writes the restricted-claims policy file. One entry is one
-policy topic: a category, its trigger keywords, whether matches are always
+"""Reads and writes the restricted-claims policy. One entry is one policy
+topic: a category, its trigger keywords, whether matches are always
 unsupported, and a note shown in the Admin UI.
+
+Backed by Postgres (Neon) when app.db.is_postgres_enabled() -- this is
+what the assistant actually enforces on every answer (see
+app.claim_checker.check_restricted_claims), so an edit here silently
+reverting on the next Streamlit Cloud redeploy would mean a
+certification/pricing/safety guardrail an admin just added quietly
+stops being enforced. Falls back to the original local YAML file when
+DATABASE_URL isn't set. The `path` parameter is only meaningful in the
+local-file branch -- kept in both function signatures so every existing
+caller works unchanged regardless of which backend is active.
 """
 from __future__ import annotations
 
@@ -8,6 +18,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import yaml
+
+from app import db
 
 # The risk categories the UI can render -- keeps the Admin category picker
 # from drifting out of sync.
@@ -30,7 +42,23 @@ class PolicyEntry:
 
 
 def load_entries(path: Path) -> list[PolicyEntry]:
-    """Returns [] if the file doesn't exist yet, rather than raising."""
+    """Returns [] if there's nothing saved yet, rather than raising."""
+    if db.is_postgres_enabled():
+        db.ensure_schema()
+        rows = db.fetch_all(
+            "SELECT category, keywords, always_unsupported, note "
+            "FROM restricted_claims ORDER BY position ASC"
+        )
+        return [
+            PolicyEntry(
+                category=row["category"],
+                keywords=[k.strip() for k in row["keywords"].split(",") if k.strip()],
+                always_unsupported=bool(row["always_unsupported"]),
+                note=row["note"] or "",
+            )
+            for row in rows
+        ]
+
     if not path.exists():
         return []
 
@@ -60,6 +88,18 @@ def load_entries(path: Path) -> list[PolicyEntry]:
 
 
 def save_entries(path: Path, entries: list[PolicyEntry]) -> None:
+    if db.is_postgres_enabled():
+        db.ensure_schema()
+        with db.get_connection() as conn:
+            conn.execute("DELETE FROM restricted_claims")
+            for position, entry in enumerate(entries):
+                conn.execute(
+                    "INSERT INTO restricted_claims (position, category, keywords, always_unsupported, note) "
+                    "VALUES (%s, %s, %s, %s, %s)",
+                    (position, entry.category, ", ".join(entry.keywords), entry.always_unsupported, entry.note),
+                )
+        return
+
     raw = [entry.to_dict() for entry in entries]
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(

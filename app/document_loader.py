@@ -317,6 +317,48 @@ def _detect_table_style(grid: list[list[str]], is_bold_fn: IsBoldFn) -> str:
     total_cols = len(grid[0])
 
     if total_cols == 2:
+        # A single-row, 2-column table has no room for a header row plus a
+        # data row underneath it -- "header" style is meaningless here, so
+        # it's always a label/value pair. Without this, range(1, len(grid))
+        # is empty for a 1-row grid, bold_beyond_first is always False, and
+        # every such table silently misfires into "header" style (confirmed
+        # by testing: several real catalogue tables -- e.g. a single
+        # "Selectable Connector Option" row -- were flagged by
+        # check_table_structure because their one real data row got read
+        # back out as two column headers with zero data rows).
+        if len(grid) == 1:
+            return "keyvalue"
+
+        # A vertically-merged cell in column 0 (one shared label next to
+        # several distinct per-row notes/options) has no merge information
+        # by the time it reaches this grid -- resolve_table_grid() reads
+        # python-docx cells directly, and python-docx returns the same
+        # merged cell's text for every row it spans rather than exposing
+        # the merge, so every constituent row looks like it has its own,
+        # identical column-0 value. Confirmed by testing on a real
+        # catalogue table: reading that as a real header row made the
+        # header itself double as a second, near-duplicate data row.
+        #
+        # Only trusted for a genuinely long, sentence-like column-0 value
+        # (a real merged label reads like a description, not an
+        # identifier) -- a short repeated value (a brand name, a code) is
+        # not evidence of a merge at all, it's just a legitimate repeated
+        # key across real, distinct rows. Confirmed necessary by testing:
+        # three real rows each legitimately starting with "MNST" must
+        # stay three real header-style data rows, not collapse into a
+        # false "shared label" reading. 40 chars comfortably separates a
+        # short identifier from the multi-clause sentence the real bug
+        # showed (200+ chars).
+        _MIN_MERGED_LABEL_LENGTH = 40
+        col0_values = [row[0] for row in grid if row]
+        merged_first_column = (
+            bool(col0_values)
+            and len(col0_values[0]) >= _MIN_MERGED_LABEL_LENGTH
+            and len(set(col0_values)) == 1
+        )
+        if merged_first_column:
+            return "keyvalue"
+
         bold_beyond_first = any(is_bold_fn(i, 0) for i in range(1, len(grid)))
         return "keyvalue" if bold_beyond_first else "header"
 

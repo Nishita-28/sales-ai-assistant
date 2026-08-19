@@ -23,7 +23,9 @@ from app import theme
 from app.admin_page import render_admin_page
 from app.background_jobs import get_active_jobs
 from app.claim_checker import warm_up as warm_up_claim_checker
+from app.db import is_postgres_enabled
 from app.discovery_page import render_discovery_page
+from app.document_storage import sync_local_docs_from_postgres
 from app.feedback_store import record_feedback
 from app.rag_pipeline import (
     finalize_customer_wording_question,
@@ -31,10 +33,12 @@ from app.rag_pipeline import (
     stream_answer_question,
     stream_customer_wording_question,
 )
+from app.registry_builder import rebuild_product_registry
 from app.requirements_page import render_requirements_page
 from app.response_generator import ResponseGeneratorError
 from app.response_generator import warm_up as warm_up_response_generator
 from app.retriever import RetrieverError
+from app.retriever import build_index, load_and_chunk_approved_docs
 from app.retriever import warm_up as warm_up_retriever
 from app.sales_aid_page import render_sales_aid_page
 
@@ -60,6 +64,40 @@ st.set_page_config(
     layout="centered",
 )
 theme.inject_theme()  # no-op when UI_THEME=classic -- see app/theme.py
+
+# ---------------------------------------------------------------------------
+# Cold-start sync from Neon -- Streamlit Community Cloud's filesystem is
+# ephemeral, so a fresh container's local data/approved_docs/ is either
+# empty or leftover from an unrelated previous container. When
+# DATABASE_URL is configured, Postgres is the durable source of truth:
+# pull every stored document down to local disk, then rebuild the local
+# Chroma index and product registry from them, once per server process.
+# No-op when DATABASE_URL isn't set -- local data/approved_docs/ is
+# already the source of truth in that mode, same as before this existed.
+# ---------------------------------------------------------------------------
+@st.cache_resource
+def _sync_from_neon_on_cold_start() -> None:
+    if not is_postgres_enabled():
+        return
+    try:
+        doc_count = sync_local_docs_from_postgres(APPROVED_DOCS_DIR)
+        if doc_count > 0:
+            chunks = load_and_chunk_approved_docs(APPROVED_DOCS_DIR)
+            build_index(chunks)
+            rebuild_product_registry(APPROVED_DOCS_DIR)
+    except Exception as e:
+        # Deliberately NOT swallowed like _warm_up_backend below -- an
+        # admin needs to know the assistant may be running with an
+        # empty/stale knowledge base, not have that fail silently (see
+        # the persistence plan's point 9: never silently lose data).
+        st.error(
+            f"Failed to sync documents from the database on startup: {e}. "
+            "The assistant may have no knowledge base until this is resolved."
+        )
+
+
+_sync_from_neon_on_cold_start()
+
 
 # ---------------------------------------------------------------------------
 # Backend warm-up -- initializes API clients, the vector store connection,
@@ -246,7 +284,6 @@ def render_admin_gate() -> None:
         st.error("ADMIN_PASSWORD is not set. Add it to secrets before deploying.")
         return
 
-    st.caption("Sign in to manage documents, claims, feedback, and customer requirements.")
     with st.form("admin_login_page", clear_on_submit=True):
         entered_password = st.text_input("Admin password", type="password")
         submitted = st.form_submit_button("Unlock admin", type="primary")
@@ -377,7 +414,7 @@ def _render_assistant_page_classic() -> None:
         st.markdown("**Try asking:**")
         cols = st.columns(len(SAMPLE_QUESTIONS))
         for col, q in zip(cols, SAMPLE_QUESTIONS):
-            if col.button(q, use_container_width=True):
+            if col.button(q, width="stretch"):
                 st.session_state.pending_question = q
 
     # Render past Q&A as a chat thread
@@ -431,13 +468,12 @@ def _render_assistant_page_enterprise() -> None:
     chat thread. Most recent answer is shown first, like a search/report
     tool rather than an accumulating chat log."""
     st.title("Assistant")
-    st.caption("Answers only from approved company documents. Always shows sources and confidence.")
 
     if not st.session_state.history:
         st.markdown("**Try asking:**")
         cols = st.columns(len(SAMPLE_QUESTIONS))
         for col, q in zip(cols, SAMPLE_QUESTIONS):
-            if col.button(q, use_container_width=True):
+            if col.button(q, width="stretch"):
                 st.session_state.pending_question = q
 
     # A plain text_input + separate button doesn't submit on Enter -- Enter
@@ -451,7 +487,7 @@ def _render_assistant_page_enterprise() -> None:
             placeholder="Ask a sales or application question…",
             label_visibility="collapsed",
         )
-        asked = ask_col.form_submit_button("Ask", type="primary", use_container_width=True)
+        asked = ask_col.form_submit_button("Ask", type="primary", width="stretch")
 
     if "pending_question" in st.session_state:
         question = st.session_state.pop("pending_question")

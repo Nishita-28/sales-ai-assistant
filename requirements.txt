@@ -1,4 +1,5 @@
 streamlit>=1.60.0
+psycopg[binary]
 pyyaml
 python-dotenv
 pandas

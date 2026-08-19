@@ -20,6 +20,9 @@ generically (see requirements_page._collect_custom_values).
 Customer Name/Company are NOT in this list -- they come from the deal
 picker (app.deal_picker) now, the same identity Pre-Call Discovery uses,
 not a form field an admin can relabel or hide.
+
+Backed by Postgres (Neon) when app.db.is_postgres_enabled() -- see
+app.deals_store's module docstring for why.
 """
 from __future__ import annotations
 
@@ -27,6 +30,10 @@ import json
 import re
 from pathlib import Path
 from typing import Any
+
+from psycopg.types.json import Jsonb
+
+from app import db
 
 FIELDS_PATH = Path("data/requirements_fields.json")
 
@@ -68,9 +75,17 @@ def _slugify(label: str) -> str:
 
 
 def load_fields() -> list[dict[str, Any]]:
-    """The current field list, seeding data/requirements_fields.json with
-    DEFAULT_FIELDS on first call so the file always reflects real, current
-    state rather than an implicit fallback the admin page can't see."""
+    """The current field list, seeding storage with DEFAULT_FIELDS on
+    first call so it always reflects real, current state rather than an
+    implicit fallback the admin page can't see."""
+    if db.is_postgres_enabled():
+        db.ensure_schema()
+        row = db.fetch_one("SELECT fields FROM requirements_fields WHERE id = 1")
+        if row is None:
+            save_fields(DEFAULT_FIELDS)
+            return [dict(f) for f in DEFAULT_FIELDS]
+        return row["fields"]
+
     if not FIELDS_PATH.exists():
         save_fields(DEFAULT_FIELDS)
         return [dict(f) for f in DEFAULT_FIELDS]
@@ -78,6 +93,15 @@ def load_fields() -> list[dict[str, Any]]:
 
 
 def save_fields(fields: list[dict[str, Any]]) -> None:
+    if db.is_postgres_enabled():
+        db.ensure_schema()
+        db.execute(
+            "INSERT INTO requirements_fields (id, fields) VALUES (1, %s) "
+            "ON CONFLICT (id) DO UPDATE SET fields = EXCLUDED.fields",
+            (Jsonb(fields),),
+        )
+        return
+
     FIELDS_PATH.parent.mkdir(parents=True, exist_ok=True)
     FIELDS_PATH.write_text(json.dumps(fields, indent=2, ensure_ascii=False), encoding="utf-8")
 

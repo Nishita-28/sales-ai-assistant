@@ -16,7 +16,7 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Optional
 
 from app.claim_checker import check_restricted_claims, guardrail_source_text
 from app.generation_helpers import (
@@ -101,6 +101,7 @@ def stream_sales_aid(
     use_case_description: str,
     compare_against: str = "",
     top_k: int = 12,
+    mnst_products: Optional[list[str]] = None,
 ) -> tuple[list[dict[str, Any]], Iterator[str]]:
     """Streaming counterpart to generate_sales_aid(). Returns (matches,
     text_stream) -- stream text_stream to the UI (e.g. via st.write_stream)
@@ -109,7 +110,17 @@ def stream_sales_aid(
     structured (priorities/title/framing/comparison table/summary), so
     what streams live is that raw text, not the final rendered
     layout -- the properly parsed sections render once finalize_ runs,
-    same pattern as the Assistant page's streamed answer."""
+    same pattern as the Assistant page's streamed answer.
+
+    mnst_products, when given, scopes the MNST side of the comparison to
+    exactly those products instead of leaving it to broad, unscoped
+    retrieval -- proven necessary by testing: a generic use case with no
+    product named (e.g. "around the clock monitoring") can rank chunks
+    from two or more different MNST products at the top, which the LLM
+    then has no way to tell apart from a real competitor without an
+    explicit prompt rule (see sales_aid_prompt.md's THIRD CRITICAL RULE).
+    Letting the rep name the product directly avoids relying on retrieval
+    ranking alone to pick the right one."""
     from app.retriever import all_document_names, retrieve
 
     query = use_case_description
@@ -129,7 +140,13 @@ def stream_sales_aid(
     mnst_docs = set(all_names) - competitor_docs
 
     half = max(top_k // 2, 4)
-    mnst_retrieval = retrieve(query, top_k=half, exclude_document_names=competitor_docs, scope_to_products=False)
+    mnst_retrieval = retrieve(
+        query,
+        top_k=half,
+        exclude_document_names=competitor_docs,
+        scope_to_products=False,
+        mentioned_products=mnst_products or None,
+    )
     competitor_retrieval = retrieve(query, top_k=half, exclude_document_names=mnst_docs, scope_to_products=False)
     matches = (mnst_retrieval.get("matches") or []) + (competitor_retrieval.get("matches") or [])
 
@@ -139,10 +156,19 @@ def stream_sales_aid(
         else "No specific competitor named -- use whichever competing technology/product in the "
         "excerpts is most relevant to this use case."
     )
+    mnst_line = (
+        f"Use specifically these MNST product(s): {', '.join(mnst_products)}. "
+        "Only compare the MNST product(s) named here -- do not bring in another MNST product from "
+        "the excerpts even if it seems relevant."
+        if mnst_products
+        else "No specific MNST product named -- use whichever MNST product(s) in the excerpts are "
+        "most relevant to this use case."
+    )
 
     system_prompt = _load_prompt(SALES_AID_PROMPT_PATH)
     user_message = (
         f"Approved knowledge base excerpts:\n{build_context_block(matches)}\n\n"
+        f"{mnst_line}\n\n"
         f"{compare_line}\n\n"
         f"Customer use case: {use_case_description}"
     )
@@ -184,11 +210,12 @@ def generate_sales_aid(
     use_case_description: str,
     compare_against: str = "",
     top_k: int = 12,
+    mnst_products: Optional[list[str]] = None,
 ) -> SalesAidResult:
     """Non-streaming convenience wrapper around stream_sales_aid() +
     finalize_sales_aid(), for CLI/scripted callers with no UI to stream
     into."""
-    matches, text_stream = stream_sales_aid(use_case_description, compare_against, top_k)
+    matches, text_stream = stream_sales_aid(use_case_description, compare_against, top_k, mnst_products)
     raw_reply = "".join(text_stream)
     return finalize_sales_aid(use_case_description, matches, raw_reply)
 

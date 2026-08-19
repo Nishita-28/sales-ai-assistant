@@ -18,7 +18,16 @@ company can have multiple distinct deals (e.g. "ABC Industries --
 Electrolyzer Project" and "ABC Industries -- Portable Detector Order"),
 which a customer/company key would silently collapse into one record.
 customer_name/company are for display and search, not identity.
-"""
+
+Backed by Postgres (Neon) when app.db.is_postgres_enabled() -- a deal
+captured through Streamlit Community Cloud's ephemeral filesystem would
+otherwise vanish on the next redeploy or cold start. Falls back to the
+original local SQLite file when DATABASE_URL isn't set, so local dev/
+tests never need a live connection. Every function still returns
+something dict-like (sqlite3.Row supports both row["col"] and row[0];
+the Postgres path returns plain dicts via psycopg's dict_row, which only
+support row["col"] -- every caller in this codebase already uses
+key-based access, never positional, so this is a safe swap)."""
 from __future__ import annotations
 
 import json
@@ -27,6 +36,8 @@ from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
+
+from app import db
 
 DB_PATH = Path("data/deals.db")
 
@@ -85,14 +96,17 @@ def _connect() -> sqlite3.Connection:
 
 
 def _save_json_column(deal_id: int, column: str, value: Any) -> None:
+    now = datetime.now().isoformat(timespec="seconds")
+    payload = json.dumps(value, ensure_ascii=False)
+    if db.is_postgres_enabled():
+        db.ensure_schema()
+        db.execute(f"UPDATE deals SET {column} = %s, updated_at = %s WHERE id = %s", (payload, now, deal_id))
+        return
     with closing(_connect()) as conn, conn:
-        conn.execute(
-            f"UPDATE deals SET {column} = ?, updated_at = ? WHERE id = ?",
-            (json.dumps(value, ensure_ascii=False), datetime.now().isoformat(timespec="seconds"), deal_id),
-        )
+        conn.execute(f"UPDATE deals SET {column} = ?, updated_at = ? WHERE id = ?", (payload, now, deal_id))
 
 
-def _get_json_column(deal: sqlite3.Row, column: str) -> Optional[Any]:
+def _get_json_column(deal: Any, column: str) -> Optional[Any]:
     raw = deal[column]
     return json.loads(raw) if raw else None
 
@@ -101,6 +115,13 @@ def create_deal(customer_name: str, company: str, use_case: str = "") -> int:
     """Creates a new deal and returns its id. All 8 MEDDPICC fields start
     blank -- filled in over time via update_deal_fields()."""
     now = datetime.now().isoformat(timespec="seconds")
+    if db.is_postgres_enabled():
+        db.ensure_schema()
+        return db.execute_returning(
+            "INSERT INTO deals (customer_name, company, use_case, created_at, updated_at) "
+            "VALUES (%s, %s, %s, %s, %s) RETURNING id",
+            (customer_name, company, use_case, now, now),
+        )
     with closing(_connect()) as conn, conn:
         cursor = conn.execute(
             "INSERT INTO deals (customer_name, company, use_case, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
@@ -109,15 +130,21 @@ def create_deal(customer_name: str, company: str, use_case: str = "") -> int:
         return cursor.lastrowid
 
 
-def get_deal(deal_id: int) -> Optional[sqlite3.Row]:
+def get_deal(deal_id: int) -> Optional[Any]:
+    if db.is_postgres_enabled():
+        db.ensure_schema()
+        return db.fetch_one("SELECT * FROM deals WHERE id = %s", (deal_id,))
     with closing(_connect()) as conn:
         conn.row_factory = sqlite3.Row
         return conn.execute("SELECT * FROM deals WHERE id = ?", (deal_id,)).fetchone()
 
 
-def list_deals(limit: int = 200) -> list[sqlite3.Row]:
+def list_deals(limit: int = 200) -> list[Any]:
     """Most recently updated deals first -- for a "which deal" picker
     (search/display by customer_name/company), never for identity."""
+    if db.is_postgres_enabled():
+        db.ensure_schema()
+        return db.fetch_all("SELECT * FROM deals ORDER BY updated_at DESC LIMIT %s", (limit,))
     with closing(_connect()) as conn:
         conn.row_factory = sqlite3.Row
         return conn.execute("SELECT * FROM deals ORDER BY updated_at DESC LIMIT ?", (limit,)).fetchall()
@@ -132,8 +159,15 @@ def update_deal_fields(deal_id: int, **fields: str) -> None:
     updates = {k: v for k, v in fields.items() if k in allowed and v}
     if not updates:
         return
+    now = datetime.now().isoformat(timespec="seconds")
+    if db.is_postgres_enabled():
+        db.ensure_schema()
+        set_clause = ", ".join(f"{k} = %s" for k in updates)
+        values = (*updates.values(), now, deal_id)
+        db.execute(f"UPDATE deals SET {set_clause}, updated_at = %s WHERE id = %s", values)
+        return
     set_clause = ", ".join(f"{k} = ?" for k in updates)
-    values = [*updates.values(), datetime.now().isoformat(timespec="seconds"), deal_id]
+    values = [*updates.values(), now, deal_id]
     with closing(_connect()) as conn, conn:
         conn.execute(f"UPDATE deals SET {set_clause}, updated_at = ? WHERE id = ?", values)
 
@@ -146,7 +180,7 @@ def save_recommendation(deal_id: int, recommendation: dict[str, Any]) -> None:
     _save_json_column(deal_id, "last_recommendation", recommendation)
 
 
-def get_recommendation(deal: sqlite3.Row) -> Optional[dict[str, Any]]:
+def get_recommendation(deal: Any) -> Optional[dict[str, Any]]:
     """The deal's last saved recommendation dict, or None if it never got
     one. Kept as a plain dict here, not discovery_generator.
     RecommendationResult -- deals_store.py has no reason to import that
@@ -170,7 +204,7 @@ def save_discovery(
     )
 
 
-def get_discovery(deal: sqlite3.Row) -> Optional[dict[str, Any]]:
+def get_discovery(deal: Any) -> Optional[dict[str, Any]]:
     """{"right_to_win": [...], "answers": {...}}, or None if this deal
     has no saved Right-to-Win generation yet."""
     return _get_json_column(deal, "last_discovery")
@@ -186,16 +220,19 @@ def save_qualification(deal_id: int, qualification: list[dict[str, Any]]) -> Non
     _save_json_column(deal_id, "last_qualification", qualification)
 
 
-def get_qualification(deal: sqlite3.Row) -> Optional[list[dict[str, Any]]]:
+def get_qualification(deal: Any) -> Optional[list[dict[str, Any]]]:
     return _get_json_column(deal, "last_qualification")
 
 
-def missing_fields(deal: sqlite3.Row) -> list[tuple[str, str, str]]:
+def missing_fields(deal: Any) -> list[tuple[str, str, str]]:
     """The subset of MEDDPICC_FIELDS still blank for this deal, in
     canonical order -- what Discovery should still ask about."""
     return [(key, label, question) for key, label, question in MEDDPICC_FIELDS if not deal[key].strip()]
 
 
 def delete_deal(deal_id: int) -> None:
+    if db.is_postgres_enabled():
+        db.execute("DELETE FROM deals WHERE id = %s", (deal_id,))
+        return
     with closing(_connect()) as conn, conn:
         conn.execute("DELETE FROM deals WHERE id = ?", (deal_id,))

@@ -7,8 +7,10 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+import time
 from typing import Any, Optional
 
+from app import db
 from app.restricted_policy import PolicyError, build_lookup, load_entries
 
 NONE_CATEGORY = "None"
@@ -24,12 +26,27 @@ POLICY_PATH = Path("data/restricted_claims.yaml")
 # guardrail_source_text below.
 APPROVED_CLAIMS_DOCUMENT_NAME = "approved_claims.md"
 
+# Postgres has no file mtime to key invalidation off, so this caches for
+# a short, fixed window instead -- long enough to spare a Postgres round
+# trip on every single question, short enough that a just-saved Restricted
+# Claims edit takes effect within a few seconds rather than requiring a
+# restart. The local-file path still uses mtime, which is exact.
+_POSTGRES_CACHE_TTL_SECONDS = 5
+
 _policy_cache: Optional[tuple[float, dict[str, list[str]], set[str]]] = None
 
 
 def _load_policy() -> tuple[dict[str, list[str]], set[str]]:
     """Loads and caches the restricted-claims policy."""
     global _policy_cache
+
+    if db.is_postgres_enabled():
+        now = time.time()
+        if _policy_cache is not None and now - _policy_cache[0] < _POSTGRES_CACHE_TTL_SECONDS:
+            return _policy_cache[1], _policy_cache[2]
+        categories, always_unsupported = build_lookup(load_entries(POLICY_PATH))
+        _policy_cache = (now, categories, always_unsupported)
+        return categories, always_unsupported
 
     try:
         mtime = POLICY_PATH.stat().st_mtime
@@ -42,6 +59,15 @@ def _load_policy() -> tuple[dict[str, list[str]], set[str]]:
     categories, always_unsupported = build_lookup(load_entries(POLICY_PATH))
     _policy_cache = (mtime, categories, always_unsupported)
     return categories, always_unsupported
+
+
+def invalidate_policy_cache() -> None:
+    """Clears the cached policy -- called right after Restricted Claims
+    is saved (see admin_page._render_restricted_claims_tab) so the
+    change is enforced on the very next question, instead of waiting up
+    to _POSTGRES_CACHE_TTL_SECONDS for the cache to naturally expire."""
+    global _policy_cache
+    _policy_cache = None
 
 
 def warm_up() -> None:

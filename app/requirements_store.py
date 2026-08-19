@@ -1,6 +1,11 @@
 """Stores customer requirement submissions in a local SQLite database, so
 a sales rep's technical notes from a call become a clean record for
 production instead of a scattered email or notebook entry.
+
+Backed by Postgres (Neon) when app.db.is_postgres_enabled() -- see
+app.deals_store's module docstring for why (Streamlit Community Cloud's
+ephemeral filesystem) and why returning plain dicts instead of
+sqlite3.Row is safe here (every caller uses key-based access only).
 """
 from __future__ import annotations
 
@@ -8,7 +13,9 @@ import sqlite3
 from contextlib import closing
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
+
+from app import db
 
 DB_PATH = Path("data/requirements.db")
 
@@ -89,30 +96,43 @@ def record_requirement(
     can appear at any time without a schema change. deal_id links this
     submission to a deals.db record (see app.deals_store) -- None for a
     requirement captured with no active deal."""
-    with closing(_connect()) as conn, conn:
-        cursor = conn.execute(
-            """
-            INSERT INTO requirements (
+    now = datetime.now().isoformat(timespec="seconds")
+    values = (
+        now, customer_name, company,
+        application, product_family, install_type, num_detectors, comm_protocols,
+        certifications, installation_area, hazard_zone, temp_min, temp_max, target_gas,
+        sensing_range, accuracy, environmental, probe_length, suggested_code,
+        additional_requirements, extra_fields, deal_id,
+    )
+    columns_sql = """
                 created_at, customer_name, company, application, product_family,
                 install_type, num_detectors, comm_protocols, certifications,
                 installation_area, hazard_zone, temp_min, temp_max, target_gas,
                 sensing_range, accuracy, environmental, probe_length, suggested_code,
                 additional_requirements, extra_fields, deal_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                datetime.now().isoformat(timespec="seconds"), customer_name, company,
-                application, product_family, install_type, num_detectors, comm_protocols,
-                certifications, installation_area, hazard_zone, temp_min, temp_max, target_gas,
-                sensing_range, accuracy, environmental, probe_length, suggested_code,
-                additional_requirements, extra_fields, deal_id,
-            ),
+    """
+    if db.is_postgres_enabled():
+        db.ensure_schema()
+        return db.execute_returning(
+            f"INSERT INTO requirements ({columns_sql}) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+            "RETURNING id",
+            values,
+        )
+    with closing(_connect()) as conn, conn:
+        cursor = conn.execute(
+            f"INSERT INTO requirements ({columns_sql}) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            values,
         )
         return cursor.lastrowid
 
 
-def list_requirements(limit: int = 200) -> list[sqlite3.Row]:
+def list_requirements(limit: int = 200) -> list[Any]:
     """Most recent requirement submissions, newest first."""
+    if db.is_postgres_enabled():
+        db.ensure_schema()
+        return db.fetch_all("SELECT * FROM requirements ORDER BY created_at DESC LIMIT %s", (limit,))
     with closing(_connect()) as conn:
         conn.row_factory = sqlite3.Row
         return conn.execute(
@@ -120,12 +140,17 @@ def list_requirements(limit: int = 200) -> list[sqlite3.Row]:
         ).fetchall()
 
 
-def list_requirements_for_deal(deal_id: int) -> list[sqlite3.Row]:
+def list_requirements_for_deal(deal_id: int) -> list[Any]:
     """Every requirement submission linked to a specific deal, oldest
     first. The read side of the deal_id column recorded by
     record_requirement() -- without this, deal_id is written but never
     consulted anywhere, and a deal can't actually show what's been
     captured for it."""
+    if db.is_postgres_enabled():
+        db.ensure_schema()
+        return db.fetch_all(
+            "SELECT * FROM requirements WHERE deal_id = %s ORDER BY created_at ASC", (deal_id,)
+        )
     with closing(_connect()) as conn:
         conn.row_factory = sqlite3.Row
         return conn.execute(
@@ -135,5 +160,8 @@ def list_requirements_for_deal(deal_id: int) -> list[sqlite3.Row]:
 
 def delete_requirement(requirement_id: int) -> None:
     """Permanently removes a requirement submission from the database."""
+    if db.is_postgres_enabled():
+        db.execute("DELETE FROM requirements WHERE id = %s", (requirement_id,))
+        return
     with closing(_connect()) as conn, conn:
         conn.execute("DELETE FROM requirements WHERE id = ?", (requirement_id,))

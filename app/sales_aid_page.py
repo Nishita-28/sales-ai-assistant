@@ -13,6 +13,7 @@ from docx import Document
 from app import theme
 from app.deal_picker import render_deal_picker, set_active_deal
 from app.deals_store import update_deal_fields
+from app.product_index import load_product_index
 from app.response_generator import ResponseGeneratorError
 from app.retriever import RetrieverError
 from app.sales_aid_generator import finalize_sales_aid, stream_sales_aid
@@ -39,37 +40,55 @@ def render_sales_aid_page() -> None:
         set_active_deal(deal_id)
         st.session_state.pop("sales_aid_result", None)
 
+    # Everything below (use case, product picker, compare-against,
+    # generate button, and any previously generated result) needs a real
+    # deal to attach to -- shown only once one exists, rather than
+    # rendering an unusable form a rep could fill in and only then learn
+    # it can't submit without picking or starting a deal first.
+    if deal_id is None:
+        st.info("Pick an existing deal, or start a new one above (Customer Name + Company), to continue.")
+        return
+
+    try:
+        products, _ = load_product_index()
+    except (FileNotFoundError, OSError):
+        products = []
+    product_names = sorted({p.product_name for p in products})
+
     # st.form so Enter in "Compare against" submits like clicking the button
     # does -- a plain text_input + separate button doesn't submit on Enter.
     # Keyed per-deal (not a fixed key) so switching deals swaps in that
     # deal's own saved use case, same reason Discovery's use-case box is
     # deal-scoped.
-    with st.form(f"sales_aid_form_{deal_id if deal_id is not None else 'new'}"):
+    with st.form(f"sales_aid_form_{deal_id}"):
         use_case = st.text_area("Use case / scenario", value=deal_use_case, placeholder=EXAMPLE_USE_CASE, height=100)
+        mnst_products = st.multiselect(
+            "MNST product(s) to feature (optional)",
+            options=product_names,
+            help="Leave blank to let the AI pick whichever product(s) in the approved documents "
+            "best fit the use case -- pick one or more here to lock the comparison to exactly "
+            "those products instead.",
+        )
         compare_against = st.text_input(
             "Compare against (optional)",
-            placeholder="e.g. Metal Oxide Semiconductor Sensors -- leave blank to let the AI pick",
+            placeholder="Leave blank to let the AI pick",
         )
         generate = st.form_submit_button("Generate sales aid", type="primary")
 
     if generate:
-        if deal_id is None:
-            st.error("Pick an existing deal, or start a new one above (Customer Name + Company), first.")
-        elif not use_case.strip():
+        if not use_case.strip():
             st.error("Describe the use case first.")
         else:
             try:
                 with st.spinner("Checking approved documents..."):
-                    matches, text_stream = stream_sales_aid(use_case, compare_against)
+                    matches, text_stream = stream_sales_aid(use_case, compare_against, mnst_products=mnst_products)
                 with st.container(border=theme.is_enterprise_theme()):
                     raw_reply = st.write_stream(text_stream)
             except (RetrieverError, ResponseGeneratorError) as e:
                 st.error(f"Something went wrong generating the sales aid: {e}")
             else:
-                # deal_id is guaranteed set here -- the check above
-                # already rejected deal_id is None, and deal creation is
-                # now fully owned by render_deal_picker()'s own atomic
-                # "Start New Deal" form (see app/deal_picker.py).
+                # deal_id is guaranteed set here -- the function returned
+                # early above when it was None.
                 update_deal_fields(deal_id, use_case=use_case)
                 set_active_deal(deal_id)
 
@@ -78,12 +97,11 @@ def render_sales_aid_page() -> None:
                 record_sales_aid(use_case, compare_against, result.to_dict(), deal_id=deal_id)
                 st.rerun()
 
-    if deal_id is not None:
-        past = list_sales_aids_for_deal(deal_id)
-        if past:
-            with st.expander(f"{len(past)} previously generated for this deal"):
-                for row in reversed(past):
-                    st.caption(f"{row['created_at']} -- {row['use_case'][:60]}")
+    past = list_sales_aids_for_deal(deal_id)
+    if past:
+        with st.expander(f"{len(past)} previously generated for this deal"):
+            for row in reversed(past):
+                st.caption(f"{row['created_at']} -- {row['use_case'][:60]}")
 
     result = st.session_state.get("sales_aid_result")
     if not result:

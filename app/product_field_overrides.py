@@ -24,23 +24,69 @@ deleting a field regardless of where it came from; a hidden label is
 suppressed even if "fields" also has an entry for it (delete wins over a
 stale edit). "type" is one of app.requirements_fields.FIELD_TYPES --
 defaults to "select" for a catalogue-extracted label, since a real
-"Selectable <X>" table is always a single choice."""
+"Selectable <X>" table is always a single choice.
+
+Backed by Postgres (Neon) when app.db.is_postgres_enabled() -- see
+app.deals_store's module docstring for why."""
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any
 import json
 
+from psycopg.types.json import Jsonb
+
+from app import db
+
 OVERRIDES_PATH = Path("data/product_field_overrides.json")
+
+# get_fields()/get_hidden()/effective_additional_params() each call
+# load_overrides() independently, and a single product's field render
+# (admin_page._effective_product_fields) calls several of those in a
+# row -- against Postgres, that's 4+ separate round trips for what's
+# really one small table, proven necessary by testing: the Customer
+# Requirements admin tab took ~17s to render (and ~30s after an edit,
+# since the post-save rerun repeats the same N+1 pattern) before this
+# cache existed. A short TTL is enough to collapse those into one real
+# query per render while still picking up a save within a couple of
+# reruns -- save_overrides() also clears it directly, so an admin's own
+# edit is never waiting on the TTL to expire.
+_CACHE_TTL_SECONDS = 3
+_cache: tuple[float, dict[str, dict[str, Any]]] | None = None
 
 
 def load_overrides() -> dict[str, dict[str, Any]]:
+    global _cache
+    if db.is_postgres_enabled():
+        now = time.time()
+        if _cache is not None and now - _cache[0] < _CACHE_TTL_SECONDS:
+            return _cache[1]
+        db.ensure_schema()
+        rows = db.fetch_all("SELECT product_name, data FROM product_field_overrides")
+        result = {row["product_name"]: row["data"] for row in rows}
+        _cache = (now, result)
+        return result
+
     if not OVERRIDES_PATH.exists():
         return {}
     return json.loads(OVERRIDES_PATH.read_text(encoding="utf-8"))
 
 
 def save_overrides(overrides: dict[str, dict[str, Any]]) -> None:
+    global _cache
+    if db.is_postgres_enabled():
+        db.ensure_schema()
+        with db.get_connection() as conn:
+            conn.execute("DELETE FROM product_field_overrides")
+            for product_name, data in overrides.items():
+                conn.execute(
+                    "INSERT INTO product_field_overrides (product_name, data) VALUES (%s, %s)",
+                    (product_name, Jsonb(data)),
+                )
+        _cache = None
+        return
+
     OVERRIDES_PATH.parent.mkdir(parents=True, exist_ok=True)
     OVERRIDES_PATH.write_text(json.dumps(overrides, indent=2, ensure_ascii=False), encoding="utf-8")
 

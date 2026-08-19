@@ -25,6 +25,14 @@ from app.requirements_fields import field_map
 from app.requirements_store import list_requirements, record_requirement
 
 NOT_SURE = "Other"
+# Distinct from NOT_SURE ("Other" -- a genuine, selectable answer meaning
+# "none of the documented options apply") -- previously every select
+# dropdown below used NOT_SURE itself as its default/placeholder entry,
+# so an unanswered dropdown displayed "Other" pre-selected, indistinguishable
+# from a rep having deliberately chosen it. PLACEHOLDER is never a real
+# answer; NOT_SURE is now appended as a real, later choice instead of
+# doubling as the default.
+PLACEHOLDER = "Select an option"
 
 # Per data/restricted_claims.yaml: not documented or certified for any
 # current product. Still offered below so a real customer need can be
@@ -204,8 +212,11 @@ def _render_custom_field(f: dict, not_sure: str = NOT_SURE) -> str:
     if ftype == "number":
         return str(st.number_input(label, value=0.0, key=key))
     if ftype == "select":
-        chosen = st.selectbox(label, [not_sure] + options, key=key)
-        return "" if chosen == not_sure else chosen
+        # not_sure only appended if the admin didn't already include it in
+        # their own configured options -- avoids listing "Other" twice.
+        trailing = [] if not_sure in options else [not_sure]
+        chosen = st.selectbox(label, [PLACEHOLDER] + options + trailing, key=key)
+        return "" if chosen == PLACEHOLDER else chosen
     if ftype == "multiselect":
         return ", ".join(st.multiselect(label, options, key=key))
     if ftype == "radio":
@@ -234,7 +245,10 @@ def render_requirements_page() -> None:
     # only update on submit, so these sit outside the form (same reason
     # installation_area/hazard_zone already did).
     display_to_product = {_display_name(p.product_name): p for p in products}
-    product_choice = st.selectbox("Product", [NOT_SURE] + list(display_to_product.keys()))
+    product_placeholder = "Select a product"
+    product_choice = st.selectbox(
+        "Product", [product_placeholder] + list(display_to_product.keys()) + [NOT_SURE]
+    )
     selected_product: ProductIndexEntry | None = display_to_product.get(product_choice)
 
     installation_area = st.radio("Installation Area", ["Safe", "Hazardous"], horizontal=True)
@@ -327,8 +341,13 @@ def render_requirements_page() -> None:
         for seg_code, label, display in choosable_segments:
             option_labels = [_format_option(code, _short_option_text(val)) for code, val in display.items()]
             label_to_code = dict(zip(option_labels, display.keys()))
-            chosen = st.selectbox(f"Select {label}", [NOT_SURE] + option_labels, key=f"seg-{seg_code}")
-            if chosen != NOT_SURE:
+            chosen = st.selectbox(
+                f"Select {label}", [PLACEHOLDER] + option_labels + [NOT_SURE], key=f"seg-{seg_code}"
+            )
+            if chosen == NOT_SURE:
+                segment_selections[seg_code] = NOT_SURE
+                segment_summaries.append(f"{label}: Other (not one of the documented options)")
+            elif chosen != PLACEHOLDER:
                 code = label_to_code[chosen]
                 segment_selections[seg_code] = code
                 value = display[code]
@@ -366,8 +385,14 @@ def render_requirements_page() -> None:
                 option_labels = [_format_option(name, _short_option_text(val)) for name, val in display.items()]
                 label_to_name = dict(zip(option_labels, display.keys()))
                 if ftype == "select":
-                    chosen = st.selectbox(f"Select {label}", [NOT_SURE] + option_labels, key=key)
-                    chosen_names = [label_to_name[chosen]] if chosen != NOT_SURE else []
+                    chosen = st.selectbox(
+                        f"Select {label}", [PLACEHOLDER] + option_labels + [NOT_SURE], key=key
+                    )
+                    if chosen == NOT_SURE:
+                        segment_summaries.append(f"{label}: Other (not one of the documented options)")
+                        chosen_names = []
+                    else:
+                        chosen_names = [label_to_name[chosen]] if chosen != PLACEHOLDER else []
                 elif ftype == "multiselect":
                     chosen_list = st.multiselect(f"Select {label}", option_labels, key=key)
                     chosen_names = [label_to_name[c] for c in chosen_list]
@@ -606,7 +631,7 @@ def render_requirements_page() -> None:
         flattened.append({**row, **extra})
 
     df = pd.DataFrame(flattened)
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    st.dataframe(df, width="stretch", hide_index=True)
 
     buffer = io.BytesIO()
     df.to_excel(buffer, index=False, engine="openpyxl")

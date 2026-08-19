@@ -7,7 +7,7 @@ from __future__ import annotations
 import shutil
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import pandas as pd
 import streamlit as st
@@ -15,7 +15,9 @@ import streamlit as st
 from app import theme
 from app.background_jobs import start_job
 from app.claims_store import load_claims, save_claims
+from app.db import is_postgres_enabled
 from app.deals_store import MEDDPICC_FIELDS, delete_deal, get_recommendation, list_deals, missing_fields
+from app.document_storage import delete_document_bytes, save_document_bytes
 from app.document_types import (
     ALL_TYPES,
     get_document_type,
@@ -38,8 +40,9 @@ from app.concentration import ConcentrationRange
 from app.product_index import NomenclatureSegment, load_product_index
 from app.registry_builder import rebuild_product_registry
 from app.requirements_fields import FIELD_TYPES, load_fields, save_fields, unique_key
-from app.requirements_store import delete_requirement, list_requirements, list_requirements_for_deal
-from app.sales_aid_store import get_result, list_sales_aids_for_deal
+from app.requirements_store import delete_requirement, list_requirements
+from app.sales_aid_store import get_result, list_sales_aids
+from app.claim_checker import invalidate_policy_cache
 from app.restricted_policy import KNOWN_CATEGORIES, PolicyEntry, load_entries, save_entries
 from app.retriever import (
     RetrieverError,
@@ -107,7 +110,7 @@ def _render_rebuild_status() -> None:
         if st.button(
             "Rebuild Index Now",
             type="primary",
-            use_container_width=True,
+            width="stretch",
             help=(
                 "Rebuild is automatic after adding, removing, or editing a document. "
                 "Use this after a failed rebuild or when changing an existing document's Type."
@@ -137,7 +140,7 @@ def _confirm_remove_dialog(doc_path: Path) -> None:
         "It will be moved to `data/removed_docs/`, not permanently deleted."
     )
     col1, col2 = st.columns(2)
-    if col1.button("Remove", type="primary", use_container_width=True):
+    if col1.button("Remove", type="primary", width="stretch"):
         # The file move + type removal are near-instant, so they happen
         # right here -- the document disappears from "Current documents"
         # immediately. The slow part (removing it from the vector index,
@@ -151,6 +154,8 @@ def _confirm_remove_dialog(doc_path: Path) -> None:
         doc_name = doc_path.name
         shutil.move(str(doc_path), str(REMOVED_DOCS_DIR / doc_name))
         remove_document_type(doc_name)
+        if is_postgres_enabled():
+            delete_document_bytes(doc_name)
 
         def _finish_removal(doc_name: str = doc_name) -> None:
             remove_document_from_index(doc_name)
@@ -158,7 +163,7 @@ def _confirm_remove_dialog(doc_path: Path) -> None:
 
         start_job(f"remove-{doc_name}", doc_name, _finish_removal)
         st.rerun()
-    if col2.button("Cancel", use_container_width=True):
+    if col2.button("Cancel", width="stretch"):
         st.rerun()
 
 
@@ -258,7 +263,10 @@ def _render_documents_tab() -> None:
             st.caption(_TYPE_HELP[doc_type])
             if st.button("Add to knowledge base", type="primary"):
                 APPROVED_DOCS_DIR.mkdir(parents=True, exist_ok=True)
-                target_path.write_bytes(uploaded_file.getbuffer())
+                file_bytes = uploaded_file.getbuffer()
+                target_path.write_bytes(file_bytes)
+                if is_postgres_enabled():
+                    save_document_bytes(uploaded_file.name, bytes(file_bytes))
                 set_document_type(uploaded_file.name, doc_type)
                 with st.spinner("Indexing new document..."):
                     try:
@@ -302,7 +310,7 @@ def _render_documents_tab() -> None:
                 set_document_type(doc_path.name, chosen)
                 st.rerun()
         with col3:
-            if st.button("Remove", key=f"remove-{doc_path.name}", use_container_width=True):
+            if st.button("Remove", key=f"remove-{doc_path.name}", width="stretch"):
                 _confirm_remove_dialog(doc_path)
 
         # A plain-text edit box for a .md document -- e.g. tactics/
@@ -321,6 +329,8 @@ def _render_documents_tab() -> None:
                 )
                 if st.button("Save changes", key=f"md-save-{doc_path.name}", type="primary"):
                     doc_path.write_text(edited_text, encoding="utf-8")
+                    if is_postgres_enabled():
+                        save_document_bytes(doc_path.name, edited_text.encode("utf-8"))
                     with st.spinner("Re-indexing..."):
                         try:
                             remove_document_from_index(doc_path.name)
@@ -375,7 +385,7 @@ def _render_approved_claims_tab() -> None:
     edited = st.data_editor(
         pd.DataFrame({"Claim": bullets}),
         num_rows="dynamic",
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         key=f"editor-approved-claims-{st.session_state.approved_claims_editor_version}",
     )
@@ -459,7 +469,7 @@ def _render_restricted_claims_tab() -> None:
     edited = st.data_editor(
         _entries_to_rows(entries),
         num_rows="dynamic",
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         key=f"editor-restricted-claims-{st.session_state.restricted_claims_editor_version}",
         column_config={
@@ -474,6 +484,7 @@ def _render_restricted_claims_tab() -> None:
 
     if st.button("Save Restricted Claims", type="primary"):
         save_entries(RESTRICTED_CLAIMS_PATH, _rows_to_entries(edited))
+        invalidate_policy_cache()
         st.session_state.restricted_claims_editor_version += 1
         st.success("Saved Restricted Claims. Enforcement updated immediately.")
         st.rerun()
@@ -507,10 +518,10 @@ def _render_restricted_claims_tab() -> None:
 def _confirm_delete_report_dialog(report_id: int) -> None:
     st.write("This permanently removes the report from the database. This cannot be undone.")
     col1, col2 = st.columns(2)
-    if col1.button("Delete", type="primary", use_container_width=True):
+    if col1.button("Delete", type="primary", width="stretch"):
         delete_feedback(report_id)
         st.rerun()
-    if col2.button("Cancel", use_container_width=True):
+    if col2.button("Cancel", width="stretch"):
         st.rerun()
 
 
@@ -617,13 +628,13 @@ def _confirm_clear_feedback_dialog(cutoff_date: Optional[str]) -> None:
             "AI Performance chart above. This cannot be undone."
         )
     col1, col2 = st.columns(2)
-    if col1.button("Delete", type="primary", use_container_width=True, disabled=count == 0):
+    if col1.button("Delete", type="primary", width="stretch", disabled=count == 0):
         if cutoff_date:
             clear_feedback_before(cutoff_date)
         else:
             clear_all_feedback()
         st.rerun()
-    if col2.button("Cancel", use_container_width=True):
+    if col2.button("Cancel", width="stretch"):
         st.rerun()
 
 
@@ -639,9 +650,9 @@ def _render_feedback_data_management() -> None:
 
         col1, col2, col3 = st.columns([2, 1, 1])
         cutoff = col1.date_input("Clear events recorded before", value=None)
-        if col2.button("Clear before date", use_container_width=True, disabled=cutoff is None):
+        if col2.button("Clear before date", width="stretch", disabled=cutoff is None):
             _confirm_clear_feedback_dialog(cutoff.isoformat())
-        if col3.button("Clear all", use_container_width=True):
+        if col3.button("Clear all", width="stretch"):
             _confirm_clear_feedback_dialog(None)
 
         st.divider()
@@ -687,7 +698,7 @@ def _render_feedback_tab() -> None:
             if col1.button(
                 "Resolve",
                 key=f"resolve-{report['id']}",
-                use_container_width=True,
+                width="stretch",
                 help="Resolve marks the issue as fixed but keeps it counted in accuracy.",
             ):
                 resolve_feedback(report["id"])
@@ -695,7 +706,7 @@ def _render_feedback_tab() -> None:
             if col2.button(
                 "Delete",
                 key=f"delete-{report['id']}",
-                use_container_width=True,
+                width="stretch",
                 help="Delete removes the report and excludes it from the accuracy calculation.",
             ):
                 _confirm_delete_report_dialog(report["id"])
@@ -732,10 +743,10 @@ def _confirm_delete_deal_dialog(
         )
     st.write(warning)
     col1, col2 = st.columns(2)
-    if col1.button("Delete", type="primary", use_container_width=True):
+    if col1.button("Delete", type="primary", width="stretch"):
         delete_deal(deal_id)
         st.rerun()
-    if col2.button("Cancel", use_container_width=True):
+    if col2.button("Cancel", width="stretch"):
         st.rerun()
 
 
@@ -744,6 +755,28 @@ def _render_deals_tab() -> None:
     if not deals:
         st.caption("No deals started yet -- created from the Deal picker on Pre-Call Discovery.")
         return
+
+    # Fetched once and grouped in Python, rather than calling
+    # list_requirements_for_deal/list_sales_aids_for_deal per deal inside
+    # the loop below -- that N+1 pattern (confirmed by testing, same
+    # class of bug already fixed in product_field_overrides.py and
+    # document_types.py) turned rendering N deals into 2N extra Postgres
+    # round trips. list_requirements/list_sales_aids already return
+    # everything in one query each; reversing each deal's group restores
+    # the oldest-first order the per-deal queries used.
+    requirements_by_deal: dict[int, list[Any]] = {}
+    for r in list_requirements(limit=1000):
+        if r["deal_id"] is not None:
+            requirements_by_deal.setdefault(r["deal_id"], []).append(r)
+    for group in requirements_by_deal.values():
+        group.reverse()
+
+    sales_aids_by_deal: dict[int, list[Any]] = {}
+    for a in list_sales_aids(limit=1000):
+        if a["deal_id"] is not None:
+            sales_aids_by_deal.setdefault(a["deal_id"], []).append(a)
+    for group in sales_aids_by_deal.values():
+        group.reverse()
 
     for deal in deals:
         with st.container(border=True):
@@ -759,8 +792,8 @@ def _render_deals_tab() -> None:
                 st.caption(f"Still missing: {', '.join(still_missing)}")
 
             recommendation = get_recommendation(deal)
-            linked_requirements = list_requirements_for_deal(deal["id"])
-            linked_sales_aids = list_sales_aids_for_deal(deal["id"])
+            linked_requirements = requirements_by_deal.get(deal["id"], [])
+            linked_sales_aids = sales_aids_by_deal.get(deal["id"], [])
 
             # At-a-glance health row -- proven necessary by testing: a
             # deal with zero requirements and zero sales aids previously
@@ -794,7 +827,7 @@ def _render_deals_tab() -> None:
                     for a in linked_sales_aids:
                         st.caption(f"{a['created_at']} -- {get_result(a).get('title') or 'Untitled'}")
 
-            if st.button("Delete", key=f"delete-deal-{deal['id']}", use_container_width=True):
+            if st.button("Delete", key=f"delete-deal-{deal['id']}", width="stretch"):
                 _confirm_delete_deal_dialog(
                     deal["id"], deal["customer_name"], deal["company"],
                     len(linked_requirements), len(linked_sales_aids),
@@ -809,10 +842,10 @@ def _render_deals_tab() -> None:
 def _confirm_delete_requirement_dialog(requirement_id: int, customer_name: str, company: str) -> None:
     st.write(f"Permanently delete the requirement captured for **{customer_name}** ({company})? This cannot be undone.")
     col1, col2 = st.columns(2)
-    if col1.button("Delete", type="primary", use_container_width=True):
+    if col1.button("Delete", type="primary", width="stretch"):
         delete_requirement(requirement_id)
         st.rerun()
-    if col2.button("Cancel", use_container_width=True):
+    if col2.button("Cancel", width="stretch"):
         st.rerun()
 
 
@@ -829,7 +862,7 @@ def _render_requirements_records_tab() -> None:
             if row["hazard_zone"]:
                 area += f" ({row['hazard_zone']})"
             st.caption(f"{row['application'] or 'No application noted'} | {row['install_type']} | {area}")
-            if st.button("Delete", key=f"delete-req-{row['id']}", use_container_width=True):
+            if st.button("Delete", key=f"delete-req-{row['id']}", width="stretch"):
                 _confirm_delete_requirement_dialog(row["id"], row["customer_name"], row["company"])
 
 
@@ -906,10 +939,10 @@ def _effective_product_fields(product) -> list[tuple[str, dict[str, str], bool, 
 def _confirm_delete_product_field_dialog(product_name: str, label: str) -> None:
     st.write(f"Delete **{label}** from {product_name}'s Customer Requirements fields? This cannot be undone.")
     col1, col2 = st.columns(2)
-    if col1.button("Delete", type="primary", use_container_width=True):
+    if col1.button("Delete", type="primary", width="stretch"):
         product_field_overrides.remove_field(product_name, label)
         st.rerun()
-    if col2.button("Cancel", use_container_width=True):
+    if col2.button("Cancel", width="stretch"):
         st.rerun()
 
 
@@ -917,11 +950,11 @@ def _confirm_delete_product_field_dialog(product_name: str, label: str) -> None:
 def _confirm_delete_generic_field_dialog(key: str, label: str) -> None:
     st.write(f"Delete **{label}** from the general Customer Requirements fields? This cannot be undone.")
     col1, col2 = st.columns(2)
-    if col1.button("Delete", type="primary", use_container_width=True):
+    if col1.button("Delete", type="primary", width="stretch"):
         fields = load_fields()
         save_fields([f for f in fields if f["key"] != key])
         st.rerun()
-    if col2.button("Cancel", use_container_width=True):
+    if col2.button("Cancel", width="stretch"):
         st.rerun()
 
 
@@ -947,10 +980,10 @@ def _render_product_field_row(
         code_note = " *(ordering code)*" if is_ordering_code else ""
         opts_note = f" -- {', '.join(options.keys())}" if options else ""
         col1.markdown(f"**{label}**{code_note} -- {field_type}{opts_note}")
-        if col2.button("Edit", key=f"edit-btn-product-{product_name}-{label}", use_container_width=True):
+        if col2.button("Edit", key=f"edit-btn-product-{product_name}-{label}", width="stretch"):
             st.session_state[edit_key] = True
             st.rerun()
-        if col3.button("Delete", key=f"del-btn-product-{product_name}-{label}", use_container_width=True):
+        if col3.button("Delete", key=f"del-btn-product-{product_name}-{label}", width="stretch"):
             _confirm_delete_product_field_dialog(product_name, label)
     else:
         with st.form(f"edit-form-product-{product_name}-{label}"):
@@ -964,8 +997,8 @@ def _render_product_field_row(
             )
             st.caption("One per line. Add Option name: description if needed.")
             save_col, cancel_col = st.columns(2)
-            save = save_col.form_submit_button("Save", type="primary", use_container_width=True)
-            cancel = cancel_col.form_submit_button("Cancel", use_container_width=True)
+            save = save_col.form_submit_button("Save", type="primary", width="stretch")
+            cancel = cancel_col.form_submit_button("Cancel", width="stretch")
         if save:
             new_options = _parse_options_text(new_options_text)
             if new_type in ("select", "multiselect", "radio") and not new_options:
@@ -993,7 +1026,7 @@ def _render_generic_field_row(field: dict) -> None:
         if field.get("options"):
             type_line += " -- " + ", ".join(field["options"])
         col1.markdown(f"**{field['label']}**{hidden_tag} -- {type_line}")
-        if col2.button("Edit", key=f"edit-btn-generic-{key}", use_container_width=True):
+        if col2.button("Edit", key=f"edit-btn-generic-{key}", width="stretch"):
             st.session_state[edit_key] = True
             st.rerun()
         # A core field's widget is hardcoded in requirements_page.py
@@ -1004,7 +1037,7 @@ def _render_generic_field_row(field: dict) -> None:
         # of these. A custom field has no such widget to fall back
         # to, so it's deleted outright.
         delete_label = "Hide" if field.get("core") else "Delete"
-        if col3.button(delete_label, key=f"del-btn-generic-{key}", use_container_width=True):
+        if col3.button(delete_label, key=f"del-btn-generic-{key}", width="stretch"):
             if field.get("core"):
                 # Reversible (just sets visible=False, un-hide via Edit's
                 # "Visible" checkbox) -- no confirmation needed.
@@ -1026,8 +1059,8 @@ def _render_generic_field_row(field: dict) -> None:
             new_required = st.checkbox("Required", value=field.get("required", False))
             new_visible = st.checkbox("Visible", value=field.get("visible", True))
             save_col, cancel_col = st.columns(2)
-            save = save_col.form_submit_button("Save", type="primary", use_container_width=True)
-            cancel = cancel_col.form_submit_button("Cancel", use_container_width=True)
+            save = save_col.form_submit_button("Save", type="primary", width="stretch")
+            cancel = cancel_col.form_submit_button("Cancel", width="stretch")
         if save:
             label = new_label.strip()
             if not label:

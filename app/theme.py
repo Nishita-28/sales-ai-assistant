@@ -28,15 +28,24 @@ def is_enterprise_theme() -> bool:
 
 
 def apply_native_theme_option() -> None:
-    """Sets Streamlit's own theme.primaryColor at runtime (no-op under
+    """Sets Streamlit's own native theme options at runtime (no-op under
     classic). Needed on top of inject_theme()'s CSS: canvas-rendered
-    widgets like st.data_editor's selected-cell outline (glide-data-grid)
-    read Streamlit's native theme, not the DOM, so CSS can't recolor them --
-    only this reaches them. Must run before st.set_page_config()."""
+    widgets -- st.data_editor / st.dataframe (glide-data-grid) draw their
+    cells, header row, and selection outline onto a <canvas>, reading
+    colors from Streamlit's native theme config, not the DOM -- CSS can't
+    reach inside a canvas at all. Confirmed live: with only primaryColor
+    set, every data_editor/dataframe on the site rendered as a plain
+    white grid with black text, untouched by any of the dark-theme CSS
+    and glaringly inconsistent with everything around it. backgroundColor/
+    secondaryBackgroundColor/textColor are what the grid actually reads
+    for its own cell colors. Must run before st.set_page_config()."""
     if not is_enterprise_theme():
         return
     try:
         st._config.set_option("theme.primaryColor", "#184fa3")
+        st._config.set_option("theme.backgroundColor", "#0a1730")
+        st._config.set_option("theme.secondaryBackgroundColor", "#0d1d3d")
+        st._config.set_option("theme.textColor", "#f4f7fc")
     except Exception:
         pass
 
@@ -48,6 +57,19 @@ def _b64(filename: str) -> str:
 
 def logo_data_uri() -> str:
     return f"data:image/png;base64,{_b64('logo.png')}"
+
+
+def background_url() -> str:
+    """A real, plain URL -- not a base64 data URI. Confirmed by testing:
+    embedding this same ~1.7MB image as base64 inside the injected CSS
+    (re-sent in full on every single Streamlit rerun, not cached) made
+    cold starts take minutes instead of seconds. Served instead from
+    app/static/ (requires server.enableStaticServing, set in
+    .streamlit/config.toml), which the browser fetches once and caches
+    like any ordinary asset. Relative, not a leading-slash absolute path,
+    so it still resolves correctly if the app is ever deployed under a
+    URL subpath."""
+    return "app/static/sidebar-bg.png"
 
 
 # Badge color tokens, shared across pages -- keeps Assistant/Discovery/Sales
@@ -130,33 +152,84 @@ def render_logo_html() -> str:
 
 
 _CSS = """
-@font-face {{ font-family: "Ubuntu"; font-weight: 400; font-style: normal; src: url(data:font/ttf;base64,{u400}) format("truetype"); }}
-@font-face {{ font-family: "Ubuntu"; font-weight: 500; font-style: normal; src: url(data:font/ttf;base64,{u500}) format("truetype"); }}
-@font-face {{ font-family: "Ubuntu"; font-weight: 700; font-style: normal; src: url(data:font/ttf;base64,{u700}) format("truetype"); }}
+/* font-display: swap -- without it, the default (auto, which behaves
+   like "block" in Chromium) holds all text INVISIBLE while the browser
+   decodes this base64-embedded font, on every single page. Since this
+   whole stylesheet re-injects on every Streamlit rerun (every nav
+   click), that's a fresh invisible-text flash each time: the layout
+   swaps instantly but the text itself doesn't paint until the font
+   finishes decoding a moment later -- exactly the "page shifts, text
+   shows up after" lag reported live. swap paints text immediately in
+   a fallback font, then swaps to Ubuntu once it's ready, instead of
+   hiding it in the meantime. */
+@font-face {{ font-family: "Ubuntu"; font-weight: 400; font-style: normal; font-display: swap; src: url(data:font/ttf;base64,{u400}) format("truetype"); }}
+@font-face {{ font-family: "Ubuntu"; font-weight: 500; font-style: normal; font-display: swap; src: url(data:font/ttf;base64,{u500}) format("truetype"); }}
+@font-face {{ font-family: "Ubuntu"; font-weight: 700; font-style: normal; font-display: swap; src: url(data:font/ttf;base64,{u700}) format("truetype"); }}
 
 :root {{
-  --mnst-page: #f5f8fc;
-  --mnst-surface: #ffffff;
-  --mnst-sidebar: #071c3b;
-  --mnst-ink-900: #15171a;
-  --mnst-ink-700: #40444c;
-  --mnst-ink-500: #6d7178;
-  --mnst-border: #e8e8e8;
-  --mnst-border-strong: #d7d9dd;
-  --mnst-blue: #184fa3;
-  --mnst-blue-600: #123c80;
-  --mnst-blue-50: #edf3fb;
+  /* Dark theme, everywhere -- the whole app sits on the fixed background
+     image (see .stApp below), so every token here is calibrated for
+     light text/translucent panels over a dark photo, not the old
+     light-page/dark-sidebar split. --mnst-page is the fallback color
+     while the image loads (and shows at the image's own dark edges),
+     not a visible surface of its own anymore. */
+  --mnst-page: #050e1f;
+  --mnst-surface: rgba(9, 20, 42, 0.74);
+  --mnst-surface-solid: #0a1730;
+  --mnst-sidebar: rgba(4, 10, 22, 0.86);
+  --mnst-ink-900: #f4f7fc;
+  --mnst-ink-700: #c9d4e8;
+  --mnst-ink-500: #93a3c4;
+  --mnst-border: rgba(255, 255, 255, 0.12);
+  --mnst-border-strong: rgba(255, 255, 255, 0.24);
+  --mnst-blue: #3f7fdb;
+  --mnst-blue-600: #5c95ea;
+  --mnst-blue-50: rgba(63, 127, 219, 0.28);
   --mnst-rail-ink-900: #ffffff;
   --mnst-rail-ink-600: #b7c6e2;
   --mnst-rail-ink-400: #7288ac;
-  --mnst-rail-border: #14294f;
-  --mnst-rail-active-bg: #12305e;
+  --mnst-rail-border: rgba(255, 255, 255, 0.1);
+  /* Solid, not translucent -- a rounded, alpha-blended rectangle sitting
+     over the busy background image can show a faint anti-aliased rim at
+     its own edge, which reads as an unexplained "box" even though no
+     separate border/outline element is actually there (confirmed by
+     testing: outline, border, box-shadow, and filter all compute as
+     fully inert on the link, every descendant, every ancestor, and both
+     pseudo-elements). An opaque color has no edge to blend, removing the
+     ambiguity at the source instead of chasing a property that isn't
+     the real cause. */
+  --mnst-rail-active-bg: #1f4e8a;
 }}
 
 html, body, .stApp {{ font-family: "Ubuntu", -apple-system, "Segoe UI", Helvetica, Arial, sans-serif !important; }}
-.stApp {{ background: var(--mnst-page); }}
-h1, h2, h3, .stMarkdown h1, .stMarkdown h2, .stMarkdown h3 {{ font-weight: 700 !important; letter-spacing: -0.01em; color: var(--mnst-ink-900); }}
-p, .stMarkdown p, .stCaption, [data-testid="stCaptionContainer"] {{ color: var(--mnst-ink-500); }}
+/* Longhand properties, not the `background` shorthand -- confirmed by
+   testing that the shorthand silently drops the whole declaration (computed
+   backgroundImage stayed "none") once the embedded base64 image pushed the
+   single property value past roughly 2MB, even though the CSS text itself
+   was well-formed. Longhand background-image alone doesn't hit the same
+   wall. */
+/* A flat dark scrim (same color as --mnst-page) is layered over the
+   image itself, not just placed behind translucent cards -- the image's
+   bright wave/skyline detail was competing with the actual UI content
+   for attention rather than reading as background atmosphere. Muting the
+   image directly, once, fixes that everywhere instead of needing every
+   card to individually out-contrast it. */
+.stApp {{
+  background-color: var(--mnst-page) !important;
+  background-image: linear-gradient(rgba(5, 14, 31, 0.72), rgba(5, 14, 31, 0.72)), url("{bg}") !important;
+  background-position: center center !important;
+  background-size: cover !important;
+  background-repeat: no-repeat !important;
+  background-attachment: fixed !important;
+}}
+[data-testid="stHeader"] {{ background: transparent !important; }}
+/* color needs !important here -- confirmed by testing: Streamlit's own
+   base stylesheet sets a specific dark text color (rgb(49,51,63)) that
+   otherwise wins the cascade over this rule. Invisible under the old
+   light theme (both colors were dark-ish, indistinguishable), but a real
+   near-black-on-dark-background bug once the theme flipped to light text. */
+h1, h2, h3, .stMarkdown h1, .stMarkdown h2, .stMarkdown h3 {{ font-weight: 700 !important; letter-spacing: -0.01em; color: var(--mnst-ink-900) !important; }}
+p, .stMarkdown p, .stCaption, [data-testid="stCaptionContainer"] {{ color: var(--mnst-ink-500) !important; }}
 
 /* ---------------- Sidebar ---------------- */
 [data-testid="stSidebar"] {{ background: var(--mnst-sidebar); border-right: 1px solid var(--mnst-rail-border); }}
@@ -226,21 +299,65 @@ p, .stMarkdown p, .stCaption, [data-testid="stCaptionContainer"] {{ color: var(-
   user-select: none !important;
 }}
 [data-testid="stSidebarNavLink"] [data-testid="stIconMaterial"] {{ font-size: 20px !important; }}
-[data-testid="stSidebarNavLink"]:hover, [data-testid="stSidebarNavLink"]:hover * {{
-  background: #0d2547 !important; color: #fff !important;
+/* The real root cause of the persistent "box", found only by forcibly
+   overriding background/background-image/text-shadow via an injected
+   test rule and watching it disappear, then confirmed by reading
+   getComputedStyle('background') (not just backgroundColor) directly on
+   the <a> itself: Streamlit's OWN base stylesheet paints the current-page
+   sidebar link with rgba(151, 166, 195, 0.25) -- a light grey-blue,
+   clearly tuned for Streamlit's default light theme. Every earlier
+   attempt at this (background-color only, outline, border, box-shadow,
+   filter, backdrop-filter, removing the fill entirely) targeted the
+   wrong property or masked it inconsistently; this light translucent
+   fill was always the thing rendering underneath, and against a dark
+   background it reads as a pale, unexplained rectangle. `background`
+   (the shorthand Streamlit's own rule uses), not `background-color`,
+   is required to actually win the cascade here. */
+/* Background is painted on the <a> ONLY, never on descendants: painting
+   the same translucent color on both a parent and a smaller child box
+   (icon span, text span, <p>) stacks two semi-transparent layers where
+   they overlap, compositing to a visibly denser rectangle tightly
+   around the label text -- confirmed via getComputedStyle on every
+   descendant of a hovered link, each independently carrying its own
+   copy of the identical background. Descendants get color only, plus
+   an explicit transparent background so nothing else can repaint them. */
+[data-testid="stSidebarNavLink"]:hover {{
+  background: rgba(63, 127, 219, 0.14) !important; color: #fff !important;
 }}
-/* Background goes on the link AND every descendant (icon, text span),
-   not just the link itself -- otherwise the :hover rule above (which
-   also paints every descendant) can win on the icon/text spans while
-   this rule wins on the outer link, since clicking a nav item makes it
-   the current page while the mouse is still resting on it (hover never
-   actually ends) -- two different backgrounds layered on top of each
-   other read as a separate highlighted box around just the text. */
-[data-testid="stSidebarNavLink"][aria-current="page"], [data-testid="stSidebarNavLink"][aria-current="page"] * {{
-  color: #fff !important; background: var(--mnst-rail-active-bg) !important;
+[data-testid="stSidebarNavLink"]:hover * {{
+  background: transparent !important; color: #fff !important;
+}}
+[data-testid="stSidebarNavLink"][aria-current="page"] {{
+  background: var(--mnst-rail-active-bg) !important; color: #fff !important; font-weight: 700 !important;
+}}
+[data-testid="stSidebarNavLink"][aria-current="page"] * {{
+  background: transparent !important; color: #fff !important; font-weight: 700 !important;
 }}
 [data-testid="stSidebarNavLink"][aria-current="page"] {{
   border-left: 2px solid #ffffff !important;
+}}
+/* The browser's own default focus ring (a 3px solid white box drawn
+   around the whole link, confirmed via computed style) is unrelated to
+   the border-left above -- it fires because clicking a nav item leaves
+   it focused, and it's far more visible against this dark theme than it
+   ever was against the light one. The left border already marks "current
+   page" on its own; the extra focus box is redundant, not intentional. */
+[data-testid="stSidebarNavLink"]:focus, [data-testid="stSidebarNavLink"]:focus-visible {{
+  outline: none !important; box-shadow: none !important;
+}}
+/* A visible box still surrounds the active nav item even with the above
+   in place and even on a completely fresh page load with nothing focused
+   (document.activeElement is <body>) -- ruled out by testing: outline,
+   border, box-shadow, and filter all compute as genuinely inert (style:
+   none / 0px) on the link itself, every descendant, every ancestor, and
+   both ::before/::after pseudo-elements. Nothing in this stylesheet is
+   drawing it. The remaining explanation is the browser's own forced-
+   colors/high-contrast accessibility mode, which deliberately overrides
+   author styles (including outline:none) to draw its own indicator --
+   forced-color-adjust is the one property meant to opt an element out of
+   that override, so it's the next thing to try. */
+[data-testid="stSidebarNavLink"] {{
+  forced-color-adjust: none !important;
 }}
 
 /* Knowledge-base status block, pinned to the bottom of the sidebar via
@@ -287,16 +404,78 @@ p, .stMarkdown p, .stCaption, [data-testid="stCaptionContainer"] {{ color: var(-
    inspection -- this was a real, visible bug, not a guess). So the
    wrapper is the primary target now; the inner input is made borderless
    so it can't show a second, conflicting outline of its own. */
+/* Solid (not translucent) background here on purpose: this sits directly
+   over the busy, bright wave/skyline background image, and the surface
+   token's usual translucency let that image show through enough to wash
+   out both the placeholder and typed text -- confirmed by the input being
+   nearly unreadable in a screenshot taken over a bright stretch of the
+   image. A fully opaque panel reads clearly regardless of what's behind it. */
 [data-testid="stTextInputRootElement"], [data-testid="stTextArea"] > div {{
-  border-radius: 10px !important; border: 1px solid var(--mnst-border-strong) !important; background: var(--mnst-surface) !important;
+  border-radius: 10px !important; border: 1px solid var(--mnst-border-strong) !important; background: var(--mnst-surface-solid) !important;
 }}
 [data-testid="stTextInputRootElement"]:has(input:focus), [data-testid="stTextArea"] > div:has(textarea:focus) {{
   border-color: var(--mnst-blue) !important; box-shadow: 0 0 0 3px var(--mnst-blue-50) !important;
 }}
 [data-testid="stTextInput"] input, [data-testid="stTextArea"] textarea, [data-testid="stChatInput"] textarea {{
   border: none !important; outline: none !important; box-shadow: none !important; background: transparent !important;
+  color: var(--mnst-ink-900) !important;
+}}
+[data-testid="stTextInput"] input::placeholder, [data-testid="stTextArea"] textarea::placeholder, [data-testid="stChatInput"] textarea::placeholder {{
+  color: var(--mnst-ink-500) !important; opacity: 1 !important;
 }}
 [data-testid="stWidgetLabel"], [data-testid="stWidgetLabel"] p {{ color: var(--mnst-ink-700) !important; font-weight: 500 !important; }}
+
+/* stNumberInputContainer carries Streamlit's own hardcoded light-theme
+   background (rgb(240,242,246)) directly, not a CSS variable -- unlike
+   the text-input wrapper above, so it was never touched by any of the
+   dark-theme rules and stayed a bright, un-themed box next to everything
+   else on the page (confirmed via computed style: background and both
+   step-button icon colors were all still Streamlit's light-theme
+   defaults). Same solid-panel treatment as the text input above, so the
+   two read as one consistent input style. */
+[data-testid="stNumberInputContainer"] {{
+  background: var(--mnst-surface-solid) !important; border: 1px solid var(--mnst-border-strong) !important; border-radius: 10px !important;
+}}
+[data-testid="stNumberInputContainer"]:has(input:focus) {{
+  border-color: var(--mnst-blue) !important; box-shadow: 0 0 0 3px var(--mnst-blue-50) !important;
+}}
+[data-testid="stNumberInputField"] {{ color: var(--mnst-ink-900) !important; }}
+[data-testid="stNumberInputStepDown"], [data-testid="stNumberInputStepUp"] {{ color: var(--mnst-ink-700) !important; }}
+[data-testid="stNumberInputStepDown"]:hover, [data-testid="stNumberInputStepUp"]:hover {{ color: #fff !important; }}
+
+/* ---------------- File uploader ---------------- */
+[data-testid="stFileUploaderDropzone"] {{
+  background: var(--mnst-surface) !important; border: 1px dashed var(--mnst-border-strong) !important; border-radius: 10px !important;
+}}
+[data-testid="stFileUploaderDropzone"] * {{ color: var(--mnst-ink-500) !important; }}
+[data-testid="stFileUploaderDropzoneInstructions"] span {{ color: var(--mnst-ink-700) !important; }}
+
+/* ---------------- Select / Multiselect ---------------- */
+/* Same wrapper-div issue as text inputs above, but one level deeper and
+   with no data-testid on the actual wrapper -- confirmed via DOM
+   inspection: stSelectbox's <input> sits inside an unnamed, Streamlit-
+   generated div (an unstable st-emotion-cache-* class, useless to target
+   directly) that carries the real visible background; stMultiSelect's
+   equivalent wrapper sits one level above its own stMultiSelectTagsContainer.
+   :has() reaches both without depending on those unstable class names. */
+[data-testid="stSelectbox"] div:has(> input) {{
+  background: var(--mnst-surface) !important; border: 1px solid var(--mnst-border-strong) !important; border-radius: 10px !important;
+}}
+[data-testid="stMultiSelect"] div:has(> [data-testid="stMultiSelectTagsContainer"]) {{
+  background: var(--mnst-surface) !important; border: 1px solid var(--mnst-border-strong) !important; border-radius: 10px !important;
+}}
+[data-testid="stSelectbox"] input, [data-testid="stMultiSelect"] input {{
+  color: var(--mnst-ink-900) !important;
+}}
+/* The option list is a portal, rendered near the end of <body> rather than
+   nested inside the widget -- confirmed via DOM inspection: [role="listbox"]
+   itself is transparent, its immediate parent carries the real (previously
+   solid white) background. */
+div:has(> [role="listbox"]) {{
+  background: var(--mnst-surface-solid) !important; border: 1px solid var(--mnst-border-strong) !important;
+}}
+[role="option"] {{ color: var(--mnst-ink-900) !important; }}
+[role="option"]:hover, [role="option"][aria-selected="true"] {{ background: var(--mnst-blue-50) !important; }}
 
 /* ---------------- Tabs (e.g. Admin page) ---------------- */
 /* The active-tab underline is a separate element, .react-aria-SelectionIndicator,
@@ -328,13 +507,23 @@ p, .stMarkdown p, .stCaption, [data-testid="stCaptionContainer"] {{ color: var(-
 [data-testid="stCheckbox"] input:checked ~ div {{ background: var(--mnst-blue) !important; border-color: var(--mnst-blue) !important; }}
 
 /* ---------------- Cards (bordered containers) ---------------- */
+/* Translucent + blurred (not solid) -- a glassy panel over the
+   background image, matching the reference mockups, instead of a flat
+   card that would otherwise hide the image completely everywhere
+   content appears. The old shadow (a near-black rgba) was calibrated
+   for a white card on a light page and is invisible against a dark
+   background -- replaced with a soft light glow instead. */
 [data-testid="stVerticalBlockBorderWrapper"] {{
   border-radius: 12px !important; border: 1px solid var(--mnst-border) !important; background: var(--mnst-surface) !important;
-  box-shadow: 0 1px 2px rgba(15,17,20,0.04), 0 2px 8px rgba(15,17,20,0.04) !important;
+  backdrop-filter: blur(14px) !important; -webkit-backdrop-filter: blur(14px) !important;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.2), 0 8px 24px rgba(0,0,0,0.28) !important;
 }}
 
 /* ---------------- Expander (Sources) ---------------- */
-[data-testid="stExpander"] {{ border: 1px solid var(--mnst-border) !important; border-radius: 10px !important; background: var(--mnst-surface) !important; }}
+[data-testid="stExpander"] {{
+  border: 1px solid var(--mnst-border) !important; border-radius: 10px !important; background: var(--mnst-surface) !important;
+  backdrop-filter: blur(14px) !important; -webkit-backdrop-filter: blur(14px) !important;
+}}
 [data-testid="stExpander"] summary {{ font-weight: 600 !important; color: var(--mnst-ink-500) !important; font-size: 13px !important; }}
 
 /* ---------------- Badges (confidence / risk pills) ---------------- */
@@ -353,5 +542,8 @@ def inject_theme() -> None:
     files to restore, no page logic touched."""
     if not is_enterprise_theme():
         return
-    css = _CSS.format(u400=_b64("ubuntu-400.ttf"), u500=_b64("ubuntu-500.ttf"), u700=_b64("ubuntu-700.ttf"))
+    css = _CSS.format(
+        u400=_b64("ubuntu-400.ttf"), u500=_b64("ubuntu-500.ttf"), u700=_b64("ubuntu-700.ttf"),
+        bg=background_url(),
+    )
     st.markdown(f"<style>{css}</style>", unsafe_allow_html=True)
