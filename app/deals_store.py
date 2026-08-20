@@ -84,11 +84,9 @@ def _connect() -> sqlite3.Connection:
     # last_recommendation (discovery_generator.RecommendationResult.
     # to_dict()), last_discovery ({"right_to_win": [RightToWinPoint.
     # to_dict(), ...], "answers": {question: answer}}), and
-    # last_qualification ([QualificationQuestion.to_dict(), ...]).
-    # Proven necessary by direct feedback: Right-to-Win results and a
-    # rep's typed answers used to live only in browser session state,
-    # so leaving the page (or even just navigating to a different page
-    # and back) silently lost everything, forcing a full regenerate.
+    # last_qualification ([QualificationQuestion.to_dict(), ...]). Persists
+    # Right-to-Win results and a rep's typed answers across page navigation,
+    # not just browser session state.
     for column in ("last_recommendation", "last_discovery", "last_qualification"):
         if column not in existing_columns:
             conn.execute(f"ALTER TABLE deals ADD COLUMN {column} TEXT")
@@ -197,8 +195,7 @@ def save_discovery(
     """Persists this deal's last Right-to-Win generation (a list of
     discovery_generator.RightToWinPoint.to_dict()) plus whatever answers
     the rep has typed against those questions so far, and the KB sources
-    it was grounded in -- all three used to be session-only and vanished
-    the moment the rep left the page."""
+    it was grounded in."""
     _save_json_column(
         deal_id, "last_discovery", {"right_to_win": right_to_win, "answers": answers, "sources": list(sources)}
     )

@@ -24,57 +24,29 @@ def deal_label(deal) -> str:
 
 def render_deal_picker(key_prefix: str) -> tuple[int | None, str, str, str]:
     """Select an existing deal, or start a new one. Returns (deal_id,
-    customer_name, company, use_case) -- deal_id is None only while
-    "+ New deal" is selected and hasn't been started yet (customer_name/
-    company will also read as "" in that state, even if the rep has
-    typed into the boxes -- see below for why).
+    customer_name, company, use_case) -- deal_id is None while "+ New deal"
+    is selected and hasn't been started yet.
 
-    Starting a new deal is a single atomic step: Customer Name + Company
-    + a "Start New Deal" button, all inside one st.form. Proven
-    necessary by direct feedback: with these as plain, separate widgets
-    next to a page's own "Generate"/"Save" button, clicking that button
-    could race ahead of a just-typed field not yet synced to the
-    server -- the browser still showed the typed text, but the script
-    that ran to handle the click saw an empty value and rejected it. A
-    real st.form is Streamlit's own mechanism for making several widgets
-    commit together atomically with their submit button, which removes
-    that race entirely rather than trying to out-guess its timing. The
-    consequence: a caller can no longer create a deal itself from
-    whatever render_deal_picker() returns while deal_id is None (those
-    values are always "" pre-submission by design) -- deal creation is
-    fully owned here now.
+    Starting a new deal is a single atomic step (Customer Name + Company +
+    "Start New Deal", all inside one st.form), so the fields commit
+    together with the submit button rather than racing a separate page
+    action. Deal creation is fully owned here; a caller never creates a
+    deal itself from render_deal_picker()'s return values while deal_id
+    is None.
 
     Uses the shared, page-agnostic st.session_state.active_deal_id (not
-    prefixed) to pick the picker's default selection -- so a deal chosen
-    on one page (e.g. Discovery) is already selected when a rep
-    navigates to another (e.g. Customer Requirements), instead of
-    re-picking the same deal per page. key_prefix only namespaces this
-    picker's own WIDGET keys, since two pages' pickers are never both on
-    screen in the same script run but should still never risk a key
-    collision.
+    prefixed) as the default selection, so a deal chosen on one page is
+    already selected when a rep navigates to another. key_prefix only
+    namespaces this picker's own widget keys.
 
-    Selection is by deal id (via format_func), never by the display
-    label string -- proven necessary by testing: two deals for the same
-    customer/company with an identical use case produce an identical
-    label, and matching by label text would silently collide, making
-    one of them unreachable from the picker.
+    Selection is by deal id (via format_func), not by the display label,
+    since two deals for the same customer/company can produce an
+    identical label.
 
-    The selectbox's own widget key is suffixed with the active deal id
-    (not a fixed string) so that switching the active deal -- via
-    "Start New Deal" or a manual pick -- always mounts a genuinely new
-    widget instance instead of updating an existing one in place.
-    Proven necessary by testing in a real browser (not just AppTest,
-    which doesn't exercise the frontend and never caught this): right
-    after creating a deal, the selectbox kept visually showing "+ New
-    deal" even though the backend had already moved on to the new
-    deal -- and the NEXT interaction with any other widget on the page
-    (e.g. blurring the use-case box) sent that stale, still-"+ New
-    deal" frontend value back to the server, silently reverting the
-    whole page (active deal, and anything typed into deal-scoped boxes
-    like the use case) back to a blank "+ New deal" state. A fixed key
-    across that transition apparently isn't enough for the underlying
-    BaseWeb Select component to reliably resync its displayed value;
-    changing the key forces a clean remount instead."""
+    The selectbox's widget key is suffixed with the active deal id so
+    switching deals always mounts a fresh widget instance -- a fixed key
+    isn't reliable enough for BaseWeb Select to resync its displayed
+    value across that transition."""
     deals = list_deals()
     deal_by_id = {d["id"]: d for d in deals}
     options: list[int | None] = [None] + list(deal_by_id.keys())

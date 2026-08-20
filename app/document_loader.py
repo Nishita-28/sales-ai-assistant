@@ -319,13 +319,7 @@ def _detect_table_style(grid: list[list[str]], is_bold_fn: IsBoldFn) -> str:
     if total_cols == 2:
         # A single-row, 2-column table has no room for a header row plus a
         # data row underneath it -- "header" style is meaningless here, so
-        # it's always a label/value pair. Without this, range(1, len(grid))
-        # is empty for a 1-row grid, bold_beyond_first is always False, and
-        # every such table silently misfires into "header" style (confirmed
-        # by testing: several real catalogue tables -- e.g. a single
-        # "Selectable Connector Option" row -- were flagged by
-        # check_table_structure because their one real data row got read
-        # back out as two column headers with zero data rows).
+        # it's always a label/value pair.
         if len(grid) == 1:
             return "keyvalue"
 
@@ -335,20 +329,16 @@ def _detect_table_style(grid: list[list[str]], is_bold_fn: IsBoldFn) -> str:
         # python-docx cells directly, and python-docx returns the same
         # merged cell's text for every row it spans rather than exposing
         # the merge, so every constituent row looks like it has its own,
-        # identical column-0 value. Confirmed by testing on a real
-        # catalogue table: reading that as a real header row made the
-        # header itself double as a second, near-duplicate data row.
+        # identical column-0 value; reading that as a real header row would
+        # make the header itself double as a second, near-duplicate data row.
         #
         # Only trusted for a genuinely long, sentence-like column-0 value
         # (a real merged label reads like a description, not an
         # identifier) -- a short repeated value (a brand name, a code) is
         # not evidence of a merge at all, it's just a legitimate repeated
-        # key across real, distinct rows. Confirmed necessary by testing:
-        # three real rows each legitimately starting with "MNST" must
-        # stay three real header-style data rows, not collapse into a
-        # false "shared label" reading. 40 chars comfortably separates a
-        # short identifier from the multi-clause sentence the real bug
-        # showed (200+ chars).
+        # key across real, distinct rows (e.g. three rows that all
+        # legitimately start with "MNST"). 40 chars comfortably separates a
+        # short identifier from a multi-clause descriptive sentence.
         _MIN_MERGED_LABEL_LENGTH = 40
         col0_values = [row[0] for row in grid if row]
         merged_first_column = (
@@ -450,14 +440,10 @@ def check_table_coverage(block: dict[str, Any]) -> list[str]:
 # (_detect_header_row_count / _row_extends_header) merged unrelated body
 # text into what it thinks is a header row, rather than that literal text
 # actually dropping (check_table_coverage passes cleanly in this case --
-# every character is still present, just organized wrong). Proven on a
-# real approved catalogue: a table's real header ("Selectable Range")
-# got replaced by a ~300-character footnote paragraph, repeated as the
-# "name" of every column, silently burying the real values (Range 1/2/3/4)
-# as if they were themselves data under that footnote. Not a proof the
+# every character is still present, just organized wrong). Not proof the
 # header is wrong -- a table could legitimately have a long name -- but
-# cheap, high-signal, and worth a human's attention rather than silently
-# shipping it.
+# cheap, high-signal, and worth flagging for review rather than shipping
+# silently.
 _MAX_REASONABLE_COLUMN_NAME_LENGTH = 100
 
 
@@ -887,42 +873,28 @@ def extract_csv_blocks(file_path: str | Path) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 # XLSX title/table-region detection -- a leading row above a real table
 # (a report title, a subtitle, a section label) is common in real-world
-# spreadsheets and was previously silently misread as if it were the
-# header row itself, corrupting every column name below it. Confirmed on
-# the real, currently-approved Historical Sales workbook: "Client and
-# Project Details for Work Executed in since April 2022" became the name
-# of column 2, and every real column -- FY, Company Name, Sector,
-# Purpose, Location, Use Case -- was lost, replaced by generic "Column N"
-# labels on every single data row.
+# spreadsheets. Left undetected, it gets misread as the header row itself,
+# corrupting every column name below it.
 #
-# Deliberately NOT a "sparse row = title" rule -- proven too risky by
-# testing: a row with exactly one populated cell can just as easily be
-# real, legitimate data (e.g. a narrow table whose first column repeats
-# the same category value down every row, like "MNST" labeling several
-# of MNST's own product rows). Two independent, stricter signals must
-# BOTH agree before a row is ever reclassified out of the table body:
+# Deliberately not a "sparse row = title" rule: a row with exactly one
+# populated cell can just as easily be real data (e.g. a narrow table
+# whose first column repeats the same category value down every row).
+# Two independent signals must BOTH agree before a row is reclassified
+# out of the table body:
 #
 # 1. Coverage gap against the table's own "core columns" (the columns
-#    populated in every row of a genuinely consistent, regular block) --
-#    a candidate row must populate at most _MAX_TITLE_POPULATED_CORE_
-#    COLUMNS of them. An absolute count, not a percentage: a percentage
-#    threshold doesn't generalize across table widths (a real title in a
-#    narrow 3-column table leaves only 2 of 3 columns empty -- 67%, while
-#    the same kind of title in an 8-column table leaves 87% empty; a
-#    single fixed percentage bar can't fit both).
+#    populated in every row of a consistent, regular block) -- a
+#    candidate row must populate at most _MAX_TITLE_POPULATED_CORE_
+#    COLUMNS of them. An absolute count, not a percentage, since a
+#    percentage threshold doesn't generalize across table widths.
 # 2. Non-recurrence -- none of the candidate row's populated core-column
 #    values may reappear in that same column anywhere in the table body.
-#    A title is a one-off label; real row data recurs. This is what
-#    correctly leaves a repeating "MNST" row alone instead of discarding
-#    it.
+#    A title is a one-off label; real row data recurs.
 #
-# A row that doesn't clearly satisfy both stays exactly where it is --
-# left ambiguous and untouched, still the literal first row of the table
-# exactly like before this mechanism existed. This can misjudge a real
-# title as ordinary data (e.g. a two-row grouped header, tested and
-# confirmed left alone), but it can never misjudge real data as a title
-# and throw it away, which is the failure mode that actually matters for
-# a knowledge base an AI answers questions from.
+# A row that doesn't clearly satisfy both stays part of the table,
+# untouched. This can misjudge a real title as ordinary data, but it can
+# never misjudge real data as a title and discard it -- the failure mode
+# that actually matters for a knowledge base an AI answers questions from.
 # ---------------------------------------------------------------------------
 
 # How many consecutive rows must share a consistent set of populated
@@ -946,22 +918,14 @@ def _find_table_region_start(
     """Scans forward for the first index where `window` consecutive rows
     share a consistent, substantial set of populated columns -- trusted
     as where a real table begins. Returns (start_index, core_columns,
-    found); found=False means no such consistent region was located
-    (e.g. too few rows), and the other two values fall back to row 0
-    as-is -- the same, un-analyzed behavior this file always had.
+    found); found=False means no such consistent region was located, and
+    the other two values fall back to row 0 as-is.
 
     The "how wide should a real table be" yardstick is the widest
-    POPULATED row count anywhere in `rows`, not len(rows[0]) -- proven
-    necessary by testing against the real, currently-approved Historical
-    Sales workbook: openpyxl reports that sheet's width as 20 columns
-    (old formatting left over on cells that were never really used),
-    while only 7 columns ever actually hold data anywhere in it. Measured
-    against the nominal 20-wide dimension, no real row could ever reach
-    the half-of-width core-size bar, so detection silently failed across
-    the whole sheet and fell back to today's original, broken behavior.
-    A real row's own widest populated count is immune to that -- it
-    reflects what the sheet's data actually looks like, not leftover
-    formatting metadata."""
+    POPULATED row count anywhere in `rows`, not len(rows[0]) -- openpyxl
+    can report a sheet as wider than it really is due to leftover
+    formatting on cells that were never used, which would otherwise make
+    the core-size bar unreachable and silently disable detection."""
     n = len(rows)
     if n == 0:
         return 0, set(), False
@@ -1027,22 +991,20 @@ class _XlsxRegion:
 def _segment_xlsx_grid(
     rows: list[list[str]], cell_rows: list[list[Any]], gap_before: list[bool]
 ) -> list["_XlsxRegion"]:
-    """Splits a worksheet's rows into one or more regions at blank-row
-    gaps -- proven necessary by testing: a sheet can legitimately hold
-    several separate tables (a title, a table, blank rows, another
-    title, another table), and treating the whole sheet as a single
-    table silently buried the second table's real header inside the
-    first table's data rows, as if it were just another entry.
+    """Splits a worksheet's rows into one or more regions at blank-row gaps.
+    A sheet can legitimately hold several separate tables (a title, a
+    table, blank rows, another title, another table); without this,
+    treating the whole sheet as a single table would bury the second
+    table's real header inside the first table's data rows, as if it were
+    just another entry.
+
     A blank gap only becomes a real boundary once the rows before it
     already form a genuine, self-sufficient table on their own (i.e.
     _find_table_region_start succeeds within that chunk alone) --
-    otherwise those rows are merged forward into the next chunk instead
-    of being finalized as their own title-only, tableless region. Also
-    proven necessary: without this, a title+subtitle pair sitting above
-    its own table across a blank spacer row -- the exact shape of the
-    real, currently-approved Historical Sales workbook -- gets wrongly
-    split into two pieces, destroying the very case this mechanism
-    exists to fix."""
+    otherwise those rows are merged forward into the next chunk instead of
+    being finalized as their own title-only, tableless region. This also
+    keeps a title+subtitle pair sitting above its own table across a blank
+    spacer row from being wrongly split into two pieces."""
     raw_chunks: list[tuple[list[list[str]], list[list[Any]]]] = []
     cur_rows, cur_cells = [rows[0]], [cell_rows[0]]
     for i in range(1, len(rows)):
@@ -1064,14 +1026,12 @@ def _segment_xlsx_grid(
             titles = _classify_leading_title_rows(combined_rows, table_start, core)
             # table_start from _find_table_region_start is only the right
             # slice point when rows above it were actually confirmed as
-            # titles -- proven necessary by testing: a two-row grouped
-            # header (a real, meaningful row, correctly left out of
-            # `titles`) was being silently excluded from the output
-            # entirely, because the code kept slicing at the detected
-            # region-start index regardless of whether anything above it
-            # had actually been confirmed as a title. When titles is
-            # empty, nothing was confidently reclassified, so the whole
-            # region -- starting at its own row 0 -- is the table.
+            # titles -- otherwise a real, meaningful row (e.g. a two-row
+            # grouped header, correctly left out of `titles`) could get
+            # silently excluded by slicing at the detected region-start
+            # index regardless of what was actually confirmed as a title.
+            # When titles is empty, nothing was confidently reclassified,
+            # so the whole region -- starting at its own row 0 -- is the table.
             effective_start = (max(titles) + 1) if titles else 0
             regions.append(_XlsxRegion(combined_rows, combined_cells, titles, effective_start))
             pending_rows, pending_cells = [], []

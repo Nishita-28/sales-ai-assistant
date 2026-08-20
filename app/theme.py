@@ -29,16 +29,10 @@ def is_enterprise_theme() -> bool:
 
 def apply_native_theme_option() -> None:
     """Sets Streamlit's own native theme options at runtime (no-op under
-    classic). Needed on top of inject_theme()'s CSS: canvas-rendered
-    widgets -- st.data_editor / st.dataframe (glide-data-grid) draw their
-    cells, header row, and selection outline onto a <canvas>, reading
-    colors from Streamlit's native theme config, not the DOM -- CSS can't
-    reach inside a canvas at all. Confirmed live: with only primaryColor
-    set, every data_editor/dataframe on the site rendered as a plain
-    white grid with black text, untouched by any of the dark-theme CSS
-    and glaringly inconsistent with everything around it. backgroundColor/
-    secondaryBackgroundColor/textColor are what the grid actually reads
-    for its own cell colors. Must run before st.set_page_config()."""
+    classic). Needed on top of inject_theme()'s CSS: canvas-rendered widgets
+    -- st.data_editor / st.dataframe (glide-data-grid) -- read colors from
+    Streamlit's native theme config, not the DOM, so CSS alone can't reach
+    them. Must run before st.set_page_config()."""
     if not is_enterprise_theme():
         return
     try:
@@ -60,15 +54,11 @@ def logo_data_uri() -> str:
 
 
 def background_url() -> str:
-    """A real, plain URL -- not a base64 data URI. Confirmed by testing:
-    embedding this same ~1.7MB image as base64 inside the injected CSS
-    (re-sent in full on every single Streamlit rerun, not cached) made
-    cold starts take minutes instead of seconds. Served instead from
-    app/static/ (requires server.enableStaticServing, set in
-    .streamlit/config.toml), which the browser fetches once and caches
-    like any ordinary asset. Relative, not a leading-slash absolute path,
-    so it still resolves correctly if the app is ever deployed under a
-    URL subpath."""
+    """A plain URL, not a base64 data URI -- embedding the image as base64
+    would resend it in full on every rerun, badly slowing cold starts.
+    Served from app/static/ instead (requires server.enableStaticServing,
+    set in .streamlit/config.toml), which the browser fetches once and
+    caches. Relative path so it still resolves under a URL subpath."""
     return "app/static/sidebar-bg.png"
 
 
@@ -76,9 +66,7 @@ def background_url() -> str:
 # Aids visually consistent instead of each page inventing its own palette.
 _BADGE_COLORS = {
     "good": ("#e8f6ee", "#157a4f"),
-    # Brand blue, not green -- kept distinct from "good" (used elsewhere
-    # for Confidence badges) rather than recoloring that shared kind, so
-    # only the deal-status badges below are affected.
+    # Distinct from "good" (used for Confidence badges) so only deal-status badges are affected.
     "good-blue": ("#edf3fb", "#123c80"),
     "warn": ("#fbf1de", "#96650f"),
     "crit": ("#fbebea", "#ab281f"),
@@ -152,27 +140,18 @@ def render_logo_html() -> str:
 
 
 _CSS = """
-/* font-display: swap -- without it, the default (auto, which behaves
-   like "block" in Chromium) holds all text INVISIBLE while the browser
-   decodes this base64-embedded font, on every single page. Since this
-   whole stylesheet re-injects on every Streamlit rerun (every nav
-   click), that's a fresh invisible-text flash each time: the layout
-   swaps instantly but the text itself doesn't paint until the font
-   finishes decoding a moment later -- exactly the "page shifts, text
-   shows up after" lag reported live. swap paints text immediately in
-   a fallback font, then swaps to Ubuntu once it's ready, instead of
-   hiding it in the meantime. */
+/* font-display: swap avoids text staying invisible while this base64-embedded
+   font decodes on each rerun -- it paints in a fallback font immediately,
+   then swaps to Ubuntu once ready. */
 @font-face {{ font-family: "Ubuntu"; font-weight: 400; font-style: normal; font-display: swap; src: url(data:font/ttf;base64,{u400}) format("truetype"); }}
 @font-face {{ font-family: "Ubuntu"; font-weight: 500; font-style: normal; font-display: swap; src: url(data:font/ttf;base64,{u500}) format("truetype"); }}
 @font-face {{ font-family: "Ubuntu"; font-weight: 700; font-style: normal; font-display: swap; src: url(data:font/ttf;base64,{u700}) format("truetype"); }}
 
 :root {{
-  /* Dark theme, everywhere -- the whole app sits on the fixed background
-     image (see .stApp below), so every token here is calibrated for
-     light text/translucent panels over a dark photo, not the old
-     light-page/dark-sidebar split. --mnst-page is the fallback color
-     while the image loads (and shows at the image's own dark edges),
-     not a visible surface of its own anymore. */
+  /* Dark theme throughout -- the app sits on a fixed background image (see
+     .stApp below), so every token here targets light text on translucent
+     panels over a dark photo. --mnst-page is the fallback color while the
+     image loads. */
   --mnst-page: #050e1f;
   --mnst-surface: rgba(9, 20, 42, 0.74);
   --mnst-surface-solid: #0a1730;
@@ -189,31 +168,19 @@ _CSS = """
   --mnst-rail-ink-600: #b7c6e2;
   --mnst-rail-ink-400: #7288ac;
   --mnst-rail-border: rgba(255, 255, 255, 0.1);
-  /* Solid, not translucent -- a rounded, alpha-blended rectangle sitting
-     over the busy background image can show a faint anti-aliased rim at
-     its own edge, which reads as an unexplained "box" even though no
-     separate border/outline element is actually there (confirmed by
-     testing: outline, border, box-shadow, and filter all compute as
-     fully inert on the link, every descendant, every ancestor, and both
-     pseudo-elements). An opaque color has no edge to blend, removing the
-     ambiguity at the source instead of chasing a property that isn't
-     the real cause. */
+  /* Solid, not translucent -- an alpha-blended rectangle over a busy
+     background can show a faint anti-aliased rim at its edge, reading as
+     an unexplained box. An opaque color has no edge to blend. */
   --mnst-rail-active-bg: #1f4e8a;
 }}
 
 html, body, .stApp {{ font-family: "Ubuntu", -apple-system, "Segoe UI", Helvetica, Arial, sans-serif !important; }}
-/* Longhand properties, not the `background` shorthand -- confirmed by
-   testing that the shorthand silently drops the whole declaration (computed
-   backgroundImage stayed "none") once the embedded base64 image pushed the
-   single property value past roughly 2MB, even though the CSS text itself
-   was well-formed. Longhand background-image alone doesn't hit the same
-   wall. */
-/* A flat dark scrim (same color as --mnst-page) is layered over the
-   image itself, not just placed behind translucent cards -- the image's
-   bright wave/skyline detail was competing with the actual UI content
-   for attention rather than reading as background atmosphere. Muting the
-   image directly, once, fixes that everywhere instead of needing every
-   card to individually out-contrast it. */
+/* Longhand properties, not the `background` shorthand, which Chromium
+   silently drops once an embedded base64 image pushes the declaration past
+   roughly 2MB. */
+/* A flat dark scrim (same color as --mnst-page) is layered over the image
+   itself so its bright detail reads as background atmosphere rather than
+   competing with the UI content for attention. */
 .stApp {{
   background-color: var(--mnst-page) !important;
   background-image: linear-gradient(rgba(5, 14, 31, 0.72), rgba(5, 14, 31, 0.72)), url("{bg}") !important;
@@ -223,18 +190,11 @@ html, body, .stApp {{ font-family: "Ubuntu", -apple-system, "Segoe UI", Helvetic
   background-attachment: fixed !important;
 }}
 [data-testid="stHeader"] {{ background: transparent !important; }}
-/* color needs !important here -- confirmed by testing: Streamlit's own
-   base stylesheet sets a specific dark text color (rgb(49,51,63)) that
-   otherwise wins the cascade over this rule. Invisible under the old
-   light theme (both colors were dark-ish, indistinguishable), but a real
-   near-black-on-dark-background bug once the theme flipped to light text. */
+/* !important needed: Streamlit's base stylesheet sets its own dark text
+   color that otherwise wins the cascade. */
 h1, h2, h3, .stMarkdown h1, .stMarkdown h2, .stMarkdown h3 {{ font-weight: 700 !important; letter-spacing: -0.01em; color: var(--mnst-ink-900) !important; }}
-/* Split from a single shared rule: plain paragraphs are the actual
-   content this tool exists to deliver -- an AI-generated answer,
-   sitting inside a card, is the whole point of the page, not secondary
-   detail -- so it gets the brighter ink tone. True captions (source
-   labels, timestamps, "Sources" expander text) keep the dim tone,
-   since those really are secondary. */
+/* Paragraphs (the AI's actual answer) get the brighter ink tone since they're
+   the primary content; true captions keep the dim tone. */
 p, .stMarkdown p {{ color: var(--mnst-ink-700) !important; }}
 .stCaption, [data-testid="stCaptionContainer"] {{ color: var(--mnst-ink-500) !important; }}
 
@@ -244,19 +204,14 @@ p, .stMarkdown p {{ color: var(--mnst-ink-700) !important; }}
 [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3 {{ color: var(--mnst-rail-ink-900); }}
 [data-testid="stSidebar"] hr {{ border-color: var(--mnst-rail-border); }}
 
-/* Layout goal: logo at the very top, then nav, then the knowledge-base
-   status panel at the bottom. Real constraint (confirmed via computed-
-   style inspection): stSidebarContent has THREE flex children --
-   stSidebarHeader (collapse toggle), stSidebarNav (auto page list), and
-   stSidebarUserContent (everything from `with st.sidebar:`, logo AND
-   status panel glued into ONE block since they're rendered in the same
-   Python block) -- always in that DOM order, independent of script order.
-   flexbox `order` can only reorder these three whole blocks, it can't
-   interleave nav BETWEEN the logo and the status panel that live inside
-   the same block. So the logo is pulled out of flow with
-   position:absolute and drawn over reserved top padding instead; nav
-   then order:0, and the (logo-minus, status-panel-only-visually) user
-   content block order:1 so it lands after nav, at the bottom. */
+/* Layout goal: logo at the top, then nav, then the status panel at the
+   bottom. stSidebarContent has three flex children in fixed DOM order --
+   stSidebarHeader, stSidebarNav, and stSidebarUserContent (logo and status
+   panel combined, since both come from the same `with st.sidebar:` block).
+   flexbox `order` can reorder these three blocks but can't interleave nav
+   between the logo and status panel inside the same block, so the logo is
+   pulled out of flow with position:absolute over reserved top padding, nav
+   gets order:0, and the remaining status-panel content gets order:1. */
 [data-testid="stSidebarContent"] {{
   display: flex !important; flex-direction: column !important; justify-content: flex-start !important;
   position: relative !important; padding-top: 84px !important;
@@ -266,21 +221,14 @@ p, .stMarkdown p {{ color: var(--mnst-ink-700) !important; }}
 [data-testid="stSidebarUserContent"] {{
   order: 1 !important; flex-grow: 0 !important; flex-shrink: 0 !important;
   height: auto !important; min-height: 0 !important;
-  /* auto margin (not a fixed px value) pushes this block all the way to
-     the bottom of the flex column, consuming the leftover space instead
-     of leaving it empty below the panel -- the actual fix for "put it at
-     the bottom", not just "put it after nav". */
+  /* auto margin (not a fixed value) pushes this block to the bottom of the flex column. */
   margin-top: auto !important; margin-bottom: 20px !important;
   padding-top: 16px !important; border-top: 1px solid var(--mnst-rail-border) !important;
 }}
 
-/* position:fixed (anchored to the viewport corner) rather than absolute --
-   testing showed the "nearest positioned ancestor" for absolute here
-   resolves to a nested Streamlit wrapper inside stSidebarUserContent
-   (itself pushed down near the bottom by the order:1 rule above), not
-   the outer stSidebarContent, so the logo rendered overlapping the
-   status panel instead of at the top. Fixed positioning anchors to the
-   viewport directly and sidesteps that ambiguity. */
+/* position:fixed anchors to the viewport directly, avoiding ambiguity about
+   which ancestor is "nearest positioned" inside the reordered flex layout
+   above. */
 .mnst-brand {{
   position: fixed !important; top: 18px; left: 18px; width: 224px; z-index: 20;
   display: flex; align-items: center; gap: 12px; padding: 0; margin: 0; border-bottom: none;
@@ -289,14 +237,10 @@ p, .stMarkdown p {{ color: var(--mnst-ink-700) !important; }}
 .mnst-brand-word {{ font-size: 16.5px; font-weight: 700; line-height: 1.3; color: var(--mnst-rail-ink-900) !important; }}
 .mnst-brand-word span {{ display: block; font-size: 11.5px; font-weight: 500; color: var(--mnst-rail-ink-400) !important; letter-spacing: 0.04em; text-transform: uppercase; margin-top: 2px; }}
 
-/* Streamlit's auto-generated page nav links -- data-testid="stSidebarNavLink"
-   is the <a> itself (not a child of some "stSidebarNav" wrapper), and it
-   carries aria-current="page" directly when active, so the active-state
-   selector must match on that element, not a nonexistent ancestor. */
-/* Streamlit nests the visible label 2-3 levels deep (span > div > p), not
-   directly in a span, so text color has to be forced on every descendant
-   with a universal selector -- targeting just "span" or "p" alone missed
-   the actual <p data-testid="stMarkdownContainer"> text node in testing. */
+/* stSidebarNavLink is the <a> itself and carries aria-current="page"
+   directly, so the active-state selector targets it, not an ancestor. */
+/* The visible label is nested 2-3 levels deep, so text color needs a
+   universal descendant selector rather than targeting a specific tag. */
 [data-testid="stSidebarNavLink"], [data-testid="stSidebarNavLink"] * {{
   color: var(--mnst-rail-ink-600) !important; font-weight: 500 !important; font-size: 15px !important;
 }}
@@ -306,28 +250,13 @@ p, .stMarkdown p {{ color: var(--mnst-ink-700) !important; }}
   user-select: none !important;
 }}
 [data-testid="stSidebarNavLink"] [data-testid="stIconMaterial"] {{ font-size: 20px !important; }}
-/* The real root cause of the persistent "box", found only by forcibly
-   overriding background/background-image/text-shadow via an injected
-   test rule and watching it disappear, then confirmed by reading
-   getComputedStyle('background') (not just backgroundColor) directly on
-   the <a> itself: Streamlit's OWN base stylesheet paints the current-page
-   sidebar link with rgba(151, 166, 195, 0.25) -- a light grey-blue,
-   clearly tuned for Streamlit's default light theme. Every earlier
-   attempt at this (background-color only, outline, border, box-shadow,
-   filter, backdrop-filter, removing the fill entirely) targeted the
-   wrong property or masked it inconsistently; this light translucent
-   fill was always the thing rendering underneath, and against a dark
-   background it reads as a pale, unexplained rectangle. `background`
-   (the shorthand Streamlit's own rule uses), not `background-color`,
-   is required to actually win the cascade here. */
-/* Background is painted on the <a> ONLY, never on descendants: painting
-   the same translucent color on both a parent and a smaller child box
-   (icon span, text span, <p>) stacks two semi-transparent layers where
-   they overlap, compositing to a visibly denser rectangle tightly
-   around the label text -- confirmed via getComputedStyle on every
-   descendant of a hovered link, each independently carrying its own
-   copy of the identical background. Descendants get color only, plus
-   an explicit transparent background so nothing else can repaint them. */
+/* Streamlit's own base stylesheet paints the current-page link background as
+   rgba(151, 166, 195, 0.25) via the `background` shorthand -- overriding
+   with `background-color` alone doesn't win the cascade against it. */
+/* Background is painted on the <a> only, not descendants -- painting the
+   same translucent color on both a parent and a nested child stacks two
+   semi-transparent layers, compositing to a visibly denser rectangle around
+   the text. Descendants get an explicit transparent background instead. */
 [data-testid="stSidebarNavLink"]:hover {{
   background: rgba(63, 127, 219, 0.14) !important; color: #fff !important;
 }}
@@ -343,26 +272,13 @@ p, .stMarkdown p {{ color: var(--mnst-ink-700) !important; }}
 [data-testid="stSidebarNavLink"][aria-current="page"] {{
   border-left: 2px solid #ffffff !important;
 }}
-/* The browser's own default focus ring (a 3px solid white box drawn
-   around the whole link, confirmed via computed style) is unrelated to
-   the border-left above -- it fires because clicking a nav item leaves
-   it focused, and it's far more visible against this dark theme than it
-   ever was against the light one. The left border already marks "current
-   page" on its own; the extra focus box is redundant, not intentional. */
+/* Suppresses the browser's default focus ring, redundant with the
+   border-left active-state marker and far more visible on this dark theme. */
 [data-testid="stSidebarNavLink"]:focus, [data-testid="stSidebarNavLink"]:focus-visible {{
   outline: none !important; box-shadow: none !important;
 }}
-/* A visible box still surrounds the active nav item even with the above
-   in place and even on a completely fresh page load with nothing focused
-   (document.activeElement is <body>) -- ruled out by testing: outline,
-   border, box-shadow, and filter all compute as genuinely inert (style:
-   none / 0px) on the link itself, every descendant, every ancestor, and
-   both ::before/::after pseudo-elements. Nothing in this stylesheet is
-   drawing it. The remaining explanation is the browser's own forced-
-   colors/high-contrast accessibility mode, which deliberately overrides
-   author styles (including outline:none) to draw its own indicator --
-   forced-color-adjust is the one property meant to opt an element out of
-   that override, so it's the next thing to try. */
+/* Defensive: opts this element out of forced-colors/high-contrast mode
+   overriding author styles with its own indicator. */
 [data-testid="stSidebarNavLink"] {{
   forced-color-adjust: none !important;
 }}
@@ -403,20 +319,13 @@ p, .stMarkdown p {{ color: var(--mnst-ink-700) !important; }}
 }}
 
 /* ---------------- Inputs ---------------- */
-/* Streamlit's newer (react-aria) text inputs put the VISIBLE border/
-   background on stTextInputRootElement, a wrapper div -- not on the raw
-   <input> itself, which renders borderless inside it. Styling only the
-   <input> left Streamlit's own default red-accent focus ring on the
-   wrapper showing through underneath our blue one (confirmed via DOM
-   inspection -- this was a real, visible bug, not a guess). So the
-   wrapper is the primary target now; the inner input is made borderless
-   so it can't show a second, conflicting outline of its own. */
-/* Solid (not translucent) background here on purpose: this sits directly
-   over the busy, bright wave/skyline background image, and the surface
-   token's usual translucency let that image show through enough to wash
-   out both the placeholder and typed text -- confirmed by the input being
-   nearly unreadable in a screenshot taken over a bright stretch of the
-   image. A fully opaque panel reads clearly regardless of what's behind it. */
+/* Streamlit's text inputs put the visible border/background on
+   stTextInputRootElement, a wrapper div -- not the raw <input>, which
+   renders borderless inside it. The wrapper is the target so the input
+   can't show a second, conflicting outline of its own. */
+/* Solid, not translucent -- sitting directly over the busy background
+   image, the usual surface translucency washed out placeholder and typed
+   text. */
 [data-testid="stTextInputRootElement"], [data-testid="stTextArea"] > div {{
   border-radius: 10px !important; border: 2px solid var(--mnst-border-strong) !important; background: var(--mnst-surface-solid) !important;
 }}
@@ -432,14 +341,9 @@ p, .stMarkdown p {{ color: var(--mnst-ink-700) !important; }}
 }}
 [data-testid="stWidgetLabel"], [data-testid="stWidgetLabel"] p {{ color: var(--mnst-ink-700) !important; font-weight: 500 !important; }}
 
-/* stNumberInputContainer carries Streamlit's own hardcoded light-theme
-   background (rgb(240,242,246)) directly, not a CSS variable -- unlike
-   the text-input wrapper above, so it was never touched by any of the
-   dark-theme rules and stayed a bright, un-themed box next to everything
-   else on the page (confirmed via computed style: background and both
-   step-button icon colors were all still Streamlit's light-theme
-   defaults). Same solid-panel treatment as the text input above, so the
-   two read as one consistent input style. */
+/* stNumberInputContainer uses Streamlit's own hardcoded light-theme
+   background, not a CSS variable, so it needs explicit overriding. Same
+   solid-panel treatment as the text input above for a consistent style. */
 [data-testid="stNumberInputContainer"] {{
   background: var(--mnst-surface-solid) !important; border: 2px solid var(--mnst-border-strong) !important; border-radius: 10px !important;
 }}
@@ -458,13 +362,11 @@ p, .stMarkdown p {{ color: var(--mnst-ink-700) !important; }}
 [data-testid="stFileUploaderDropzoneInstructions"] span {{ color: var(--mnst-ink-700) !important; }}
 
 /* ---------------- Select / Multiselect ---------------- */
-/* Same wrapper-div issue as text inputs above, but one level deeper and
-   with no data-testid on the actual wrapper -- confirmed via DOM
-   inspection: stSelectbox's <input> sits inside an unnamed, Streamlit-
-   generated div (an unstable st-emotion-cache-* class, useless to target
-   directly) that carries the real visible background; stMultiSelect's
-   equivalent wrapper sits one level above its own stMultiSelectTagsContainer.
-   :has() reaches both without depending on those unstable class names. */
+/* Same wrapper-div issue as text inputs above, one level deeper: stSelectbox's
+   <input> sits inside an unnamed, Streamlit-generated wrapper div that
+   carries the real background; stMultiSelect's equivalent wrapper sits one
+   level above its tags container. :has() reaches both without depending on
+   unstable class names. */
 [data-testid="stSelectbox"] div:has(> input) {{
   background: var(--mnst-surface) !important; border: 2px solid var(--mnst-border-strong) !important; border-radius: 10px !important;
 }}
@@ -474,10 +376,9 @@ p, .stMarkdown p {{ color: var(--mnst-ink-700) !important; }}
 [data-testid="stSelectbox"] input, [data-testid="stMultiSelect"] input {{
   color: var(--mnst-ink-900) !important;
 }}
-/* The option list is a portal, rendered near the end of <body> rather than
-   nested inside the widget -- confirmed via DOM inspection: [role="listbox"]
-   itself is transparent, its immediate parent carries the real (previously
-   solid white) background. */
+/* The option list renders as a portal near the end of <body>, not nested
+   in the widget -- [role="listbox"] itself is transparent, its parent
+   carries the real background. */
 div:has(> [role="listbox"]) {{
   background: var(--mnst-surface-solid) !important; border: 2px solid var(--mnst-border-strong) !important;
 }}
@@ -486,26 +387,20 @@ div:has(> [role="listbox"]) {{
 
 /* ---------------- Tabs (e.g. Admin page) ---------------- */
 /* The active-tab underline is a separate element, .react-aria-SelectionIndicator,
-   only rendered on the selected [data-testid="stTab"] -- confirmed via DOM
-   inspection (Admin > Approved Claims tab underline was red by default). */
+   only rendered on the selected [data-testid="stTab"]. */
 [data-testid="stTab"] .react-aria-SelectionIndicator {{ background-color: var(--mnst-blue) !important; }}
 [data-testid="stTab"][aria-selected="true"] {{ color: var(--mnst-blue) !important; }}
 [data-testid="stTab"][aria-selected="true"] p {{ color: var(--mnst-blue) !important; font-weight: 600 !important; }}
 
 /* ---------------- Form controls (multiselect / radio / checkbox) ---------------- */
 /* Streamlit's stock accent for selected controls is red (#FF4B4B, its
-   default primaryColor) since no custom theme was ever configured -- that
-   showed up as orange multiselect chips and radio dots, confirmed via a
-   real selection on the Customer Requirements form. */
+   default primaryColor) since no native theme was configured. */
 [data-baseweb="tag"] {{ background-color: var(--mnst-blue) !important; }}
-/* Real structure (confirmed via full DOM dump, not guessed): a selected
-   stRadioOption is label > div > div > div(ring) > div(fill), with the
-   text label (stMarkdownContainer, also a <div>) as a SIBLING at the same
-   3-levels-deep position as the ring -- "div div div" matched both the
-   ring AND the text container and painted a blue box behind the label
-   text too. The ring needs :not() to exclude stMarkdownContainer at that
-   same depth; the fill dot one level deeper doesn't have that ambiguity,
-   since the text branch terminates at <p>, not another <div>. */
+/* A selected stRadioOption is label > div > div > div(ring) > div(fill), with
+   the text label as a sibling div at the same depth as the ring -- "div div
+   div" alone would also match the text container and paint a box behind it,
+   so :not() excludes stMarkdownContainer. The fill dot one level deeper
+   doesn't have this ambiguity since the text branch ends at <p>. */
 [data-testid="stRadioOption"][data-selected="true"] div div div:not([data-testid="stMarkdownContainer"]) {{
   background: var(--mnst-blue) !important; border-color: var(--mnst-blue) !important;
 }}
@@ -514,12 +409,9 @@ div:has(> [role="listbox"]) {{
 [data-testid="stCheckbox"] input:checked ~ div {{ background: var(--mnst-blue) !important; border-color: var(--mnst-blue) !important; }}
 
 /* ---------------- Cards (bordered containers) ---------------- */
-/* Translucent + blurred (not solid) -- a glassy panel over the
-   background image, matching the reference mockups, instead of a flat
-   card that would otherwise hide the image completely everywhere
-   content appears. The old shadow (a near-black rgba) was calibrated
-   for a white card on a light page and is invisible against a dark
-   background -- replaced with a soft light glow instead. */
+/* Translucent + blurred, not solid -- a glassy panel over the background
+   image rather than a flat card that would hide it. Soft light glow shadow,
+   since a dark shadow is invisible against a dark background. */
 [data-testid="stVerticalBlockBorderWrapper"] {{
   border-radius: 12px !important; border: 2px solid var(--mnst-border) !important; background: var(--mnst-surface) !important;
   backdrop-filter: blur(14px) !important; -webkit-backdrop-filter: blur(14px) !important;

@@ -45,13 +45,10 @@ OVERRIDES_PATH = Path("data/product_field_overrides.json")
 # load_overrides() independently, and a single product's field render
 # (admin_page._effective_product_fields) calls several of those in a
 # row -- against Postgres, that's 4+ separate round trips for what's
-# really one small table, proven necessary by testing: the Customer
-# Requirements admin tab took ~17s to render (and ~30s after an edit,
-# since the post-save rerun repeats the same N+1 pattern) before this
-# cache existed. A short TTL is enough to collapse those into one real
-# query per render while still picking up a save within a couple of
-# reruns -- save_overrides() also clears it directly, so an admin's own
-# edit is never waiting on the TTL to expire.
+# really one small table. A short TTL collapses those into one real query
+# per render while still picking up a save within a couple of reruns --
+# save_overrides() also clears it directly, so an admin's own edit is
+# never waiting on the TTL to expire.
 _CACHE_TTL_SECONDS = 3
 _cache: tuple[float, dict[str, dict[str, Any]]] | None = None
 

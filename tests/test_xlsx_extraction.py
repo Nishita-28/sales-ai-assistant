@@ -66,13 +66,11 @@ def test_plain_header_first_table_unaffected(tmp_path):
 
 
 def test_real_historical_sales_workbook():
-    """The actual, currently-approved production file -- the one that
-    surfaced this whole investigation. Both sheets have a title (or
-    title+subtitle) row above their real header, and the second sheet's
-    reported column width (25) is inflated well beyond the 9 columns
-    that ever actually hold data, which is exactly the case that broke
-    an earlier version of this fix (nominal sheet width used instead of
-    actual populated width)."""
+    """The actual, currently-approved production file. Both sheets have a
+    title (or title+subtitle) row above their real header, and the
+    second sheet's reported column width (25) is inflated well beyond
+    the 9 columns that ever actually hold data -- exercises the
+    populated-width-not-nominal-width logic in _find_table_region_start."""
     path = Path("data/approved_docs/Copy of Historical Sales_Customer and Use Case with Value.xlsx")
     if not path.exists():
         pytest.skip("real approved_docs file not present in this environment")
@@ -140,13 +138,13 @@ def test_stacked_title_and_subtitle_with_blank_row(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# New: multiple separate tables on one sheet
+# Multiple separate tables on one sheet
 # ---------------------------------------------------------------------------
 
 def test_multiple_tables_with_titles_on_one_sheet(tmp_path):
-    """Title / Table 1 / blank rows / Title / Table 2 -- previously the
-    second table's title AND header both got silently buried inside the
-    first table's data rows as if they were more entries."""
+    """Title / Table 1 / blank rows / Title / Table 2 -- each table and
+    its own title must be segmented separately, not read as one table
+    with the second title/header buried inside the first table's data."""
     wb = Workbook()
     ws = wb.active
     ws["A1"] = "Q1 Regional Sales"

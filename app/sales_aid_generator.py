@@ -114,13 +114,13 @@ def stream_sales_aid(
 
     mnst_products, when given, scopes the MNST side of the comparison to
     exactly those products instead of leaving it to broad, unscoped
-    retrieval -- proven necessary by testing: a generic use case with no
-    product named (e.g. "around the clock monitoring") can rank chunks
-    from two or more different MNST products at the top, which the LLM
-    then has no way to tell apart from a real competitor without an
-    explicit prompt rule (see sales_aid_prompt.md's THIRD CRITICAL RULE).
-    Letting the rep name the product directly avoids relying on retrieval
-    ranking alone to pick the right one."""
+    retrieval: a generic use case with no product named (e.g. "around the
+    clock monitoring") can rank chunks from two or more different MNST
+    products at the top, which the LLM then has no way to tell apart from
+    a real competitor without an explicit prompt rule (see
+    sales_aid_prompt.md's THIRD CRITICAL RULE). Letting the rep name the
+    product directly avoids relying on retrieval ranking alone to pick the
+    right one."""
     from app.retriever import all_document_names, retrieve
 
     query = use_case_description
@@ -128,13 +128,11 @@ def stream_sales_aid(
         query = f"{use_case_description} compared to {compare_against.strip()}"
 
     # A single unscoped retrieve() lets one side's ranking dominate the whole
-    # top_k -- confirmed by testing: a query naming a competitor technology
-    # pulled almost entirely from the competitor-comparison document, leaving
-    # 1-2 MNST chunks, and vice versa when the query leaned MNST. A real
+    # top_k -- a query naming a competitor technology can pull almost
+    # entirely from the competitor-comparison document, leaving only 1-2
+    # MNST chunks, and vice versa when the query leans MNST. A real
     # comparison needs guaranteed room for both sides, so retrieve them
-    # separately (each excluding the other's documents) and merge, the same
-    # split-retrieval fix already proven for discovery_generator.py's
-    # spreadsheet-crowding bug.
+    # separately (each excluding the other's documents) and merge.
     all_names = all_document_names()
     competitor_docs = {n for n in all_names if "competitor" in n.lower() or "comparison" in n.lower()}
     mnst_docs = set(all_names) - competitor_docs

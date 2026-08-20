@@ -1,12 +1,10 @@
 """Customer requirement capture page: lets a sales rep record a customer's
 technical needs during or after a call, for a clean handoff to production.
 
-Grounded in the real Product Index (see app/product_index.py) rather than
-a generic, hand-guessed list of options -- checked directly against the
-approved catalogues: "Ethernet" was previously offered as a communication
-protocol though no approved product documents it, and ATEX/IECEx/CE were
-offered as certification options though none of them are documented or
-certified for any current product (see data/restricted_claims.yaml).
+Grounded in the real Product Index (see app/product_index.py), not a
+generic, hand-guessed list of options -- checked directly against the
+approved catalogues so nothing offered here is actually undocumented or
+uncertified (see data/restricted_claims.yaml).
 """
 from __future__ import annotations
 
@@ -26,12 +24,9 @@ from app.requirements_store import list_requirements, record_requirement
 
 NOT_SURE = "Other"
 # Distinct from NOT_SURE ("Other" -- a genuine, selectable answer meaning
-# "none of the documented options apply") -- previously every select
-# dropdown below used NOT_SURE itself as its default/placeholder entry,
-# so an unanswered dropdown displayed "Other" pre-selected, indistinguishable
-# from a rep having deliberately chosen it. PLACEHOLDER is never a real
-# answer; NOT_SURE is now appended as a real, later choice instead of
-# doubling as the default.
+# "none of the documented options apply"). PLACEHOLDER is never a real
+# answer, so an unanswered dropdown is never indistinguishable from a rep
+# deliberately choosing "Other".
 PLACEHOLDER = "Select an option"
 
 # Per data/restricted_claims.yaml: not documented or certified for any
@@ -105,10 +100,10 @@ def _numeric_code_range(value: str) -> tuple[int, int, int] | None:
     meaning spelled out, unlike a real single fixed spec such as
     "04: LM6 Die Cast". digit_width preserves zero-padding (e.g. "01" ->
     width 2) so a chosen code matches the catalogue's own numbering.
-    Proven necessary by testing: FIXaHY-4220MA's "Industry: 01 to 50"
-    was being treated as a single fixed spec (like Enclosure) and hidden
-    from the rep entirely, when it's actually 50 real, selectable
-    options -- just ones the document doesn't individually name."""
+    Without this, a range like FIXaHY-4220MA's "Industry: 01 to 50" would
+    be treated as a single fixed spec (like Enclosure) and hidden from the
+    rep entirely, when it's actually 50 real, selectable options -- just
+    ones the document doesn't individually name."""
     m = _NUMERIC_CODE_RANGE_RE.match(value.strip())
     if not m:
         return None
@@ -150,10 +145,10 @@ def _format_option(code: str, value: str) -> str:
     """"G" instead of "G - Unknown" -- a segment option the catalogue
     lists as valid but never explains (e.g. FIXaHY-4220MA's Internal Code
     G/P/E) still needs to be selectable, just without implying there's a
-    real description being withheld. Uses "code: value" (colon), not an
-    en dash -- proven necessary by testing: "01 – 2000 ppm" reads as a
-    range from 01 to 2000, when 01 is the option's code and 2000 ppm is
-    its Span, two unrelated numbers."""
+    real description being withheld. Uses "code: value" (colon), not an en
+    dash, since "01 – 2000 ppm" would read as a range from 01 to 2000, when
+    01 is the option's code and 2000 ppm is its Span -- two unrelated
+    numbers."""
     return code if value == "Unknown" else f"{code}: {value}"
 
 
@@ -235,10 +230,7 @@ def render_requirements_page() -> None:
     # standalone, unlinked record each time.
     deal_id, customer_name, company, _deal_use_case = render_deal_picker("requirements")
 
-    # Everything below needs a real deal to attach to -- shown only once
-    # one exists, rather than rendering the full (long) requirements form
-    # only for a rep to learn at submit time that it can't be saved
-    # without a deal. Same pattern as Sales Aid and Discovery.
+    # Everything below needs an active deal to attach to.
     if deal_id is None:
         st.info("Pick an existing deal, or start a new one above (Customer Name + Company), to continue.")
         return
@@ -337,11 +329,10 @@ def render_requirements_page() -> None:
     # including a not-known fallback so a rep isn't forced to guess what
     # the customer hasn't decided yet. Grounded in the Product Index, not
     # admin-editable here -- see the module docstring. Kept outside the
-    # form and right next to the fixed-specs expander above (not buried
-    # among the generic questions below) -- proven necessary by testing:
-    # a rep looking for FIXaHY 4220MA's "Select Industry" (its ordering
-    # code) scrolled past the unrelated generic "Industry / Use Case"
-    # field first and assumed the real one was missing.
+    # form and right next to the fixed-specs expander above, not buried
+    # among the generic questions below, so it isn't mistaken for missing
+    # when a rep is looking for a specific product's own ordering code
+    # (e.g. FIXaHY 4220MA's "Select Industry").
     segment_selections: dict[str, str] = {}
     segment_summaries: list[str] = []
     if choosable_segments:
@@ -445,12 +436,10 @@ def render_requirements_page() -> None:
 
     custom_fields = [f for f in fcfg.values() if not f.get("core") and f.get("visible", True)]
 
-    # enter_to_submit=False -- proven risky by inspection: this form has
-    # 15+ fields and clear_on_submit=True, so pressing Enter out of habit
-    # in an early field (Customer Name, say) would submit -- and wipe --
-    # everything typed so far, or worse, silently save an incomplete
-    # record if Customer Name/Company happen to already be filled. A
-    # rep should only submit via the actual button.
+    # enter_to_submit=False -- this form has 15+ fields and clear_on_submit=
+    # True, so pressing Enter out of habit in an early field would submit
+    # (and wipe) everything typed so far. A rep should only submit via the
+    # actual button.
     with st.form("requirement_form", clear_on_submit=True, enter_to_submit=False):
         industries = (
             st.multiselect(_label("industries", "Industry / Use Case"), _options("industries", INDUSTRY_USE_CASES + ["Other"]))
@@ -575,10 +564,7 @@ def render_requirements_page() -> None:
         if selected_product is not None and choosable_segments and len(segment_selections) == len(choosable_segments):
             suggested_code = _suggested_code(selected_product, segment_selections)
 
-        # deal_id is guaranteed set here -- the page returns early above
-        # when it's None, and deal creation is fully owned by
-        # render_deal_picker()'s own atomic "Start New Deal" form (see
-        # app/deal_picker.py).
+        # deal_id is guaranteed set here; the page returns early above when it's None.
         set_active_deal(deal_id)
 
         record_requirement(

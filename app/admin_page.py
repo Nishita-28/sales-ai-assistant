@@ -67,15 +67,9 @@ RESTRICTED_CLAIMS_PATH = Path("data/restricted_claims.yaml")
 def _approved_doc_paths() -> list[Path]:
     """Only files that are actually indexable -- an unsupported file in the
     folder is real on disk but contributes zero chunks. Also excludes
-    Word/Excel/PowerPoint's own "~$..." lock files -- proven necessary
-    by direct feedback: opening one of the real approved .docx files in
-    Word (to review or edit it) drops a same-named "~$..." lock file
-    right into this same folder, which was being listed as if it were
-    a real 14th document (0 KB, unclassified) -- confusing on its own,
-    and removing it could leave the "Remove document?" dialog open
-    afterward, since the lock file was never a real, chunkable document
-    in the first place and reindexing "removal" of something that was
-    never really indexed could error."""
+    Word/Excel/PowerPoint's own "~$..." lock files, which appear in this
+    same folder while a real approved file is open for editing and aren't
+    real, chunkable documents."""
     if not APPROVED_DOCS_DIR.exists():
         return []
     return sorted(
@@ -142,15 +136,12 @@ def _confirm_remove_dialog(doc_path: Path) -> None:
     )
     col1, col2 = st.columns(2)
     if col1.button("Remove", type="primary", width="stretch"):
-        # The file move + type removal are near-instant, so they happen
-        # right here -- the document disappears from "Current documents"
+        # The file move + type removal are near-instant, so they happen right
+        # here -- the document disappears from "Current documents"
         # immediately. The slow part (removing it from the vector index,
-        # then a full registry rebuild -- ~a minute, see
-        # registry_builder.rebuild_product_registry's own docstring) runs
-        # on a background thread instead (see app.background_jobs), so
-        # this dialog can close immediately rather than sitting on a
-        # blocking spinner. Status shows in the sidebar on every page
-        # until it finishes (see streamlit_app.py's sidebar fragment).
+        # then a full registry rebuild) runs on a background thread instead
+        # (see app.background_jobs), so this dialog can close immediately
+        # rather than sitting on a blocking spinner.
         REMOVED_DOCS_DIR.mkdir(parents=True, exist_ok=True)
         doc_name = doc_path.name
         shutil.move(str(doc_path), str(REMOVED_DOCS_DIR / doc_name))
@@ -180,15 +171,11 @@ _TYPE_HELP = {
 
 # Which page(s) each type feeds, read off the real routing logic (app/
 # document_types.py's MAIN_ASSISTANT_EXCLUDED_TYPES, is_product_catalogue,
-# and discovery_generator.py's methodology/recommendable scoping) rather
-# than restated from memory, so this can't quietly drift out of sync with
-# what the code does -- kept plain (just the page list) per explicit
-# feedback that the routing rationale belongs in code comments, not this
-# admin-facing copy. Shown once in a reference expander rather than
-# repeated under every document row -- a caption per row was tried for the
-# field editor earlier and multiplying per-row elements is exactly what
-# previously caused a Streamlit tab-rendering bug on this same page (see
-# _render_product_field_row's comment).
+# and discovery_generator.py's methodology/recommendable scoping) so this
+# can't drift out of sync with what the code does. Shown once in a
+# reference expander rather than repeated under every document row --
+# multiplying per-row elements can trigger a Streamlit tab-rendering bug
+# on this page (see _render_product_field_row's comment).
 _TYPE_USED_BY = {
     "Product Catalogue": "Assistant, Discovery Questions, Sales Aids, Customer Requirements",
     "Use Case Guide": "Assistant, Discovery Questions, Sales Aids",
@@ -226,16 +213,12 @@ def _render_upload_result() -> None:
 
 
 def _render_removal_in_progress_banner() -> None:
-    """A loud, impossible-to-miss banner for an in-flight document-removal
-    background job (see app.background_jobs), shown right at the top of
-    this tab -- not just the small status line in the sidebar (see
-    streamlit_app.py's sidebar fragment), which is easy to miss entirely
-    if an admin isn't looking at it. Confirmed by direct timing: this job
-    genuinely takes about a minute (full product-registry rebuild), likely
-    longer on the live deployment's more limited compute -- without a
-    loud, sustained "still working" indicator right where the admin is
-    already looking, a minute of apparent silence reads as broken, not
-    slow."""
+    """A loud, hard-to-miss banner for an in-flight document-removal
+    background job (see app.background_jobs), shown at the top of this tab
+    -- not just the small status line in the sidebar (see streamlit_app.py's
+    sidebar fragment), which is easy to miss. This job genuinely takes about
+    a minute (full product-registry rebuild), so a sustained "still
+    working" indicator keeps that from reading as broken."""
     for job in get_active_jobs():
         if not job.job_id.startswith("remove-"):
             continue
@@ -270,8 +253,7 @@ def _render_documents_tab() -> None:
         )
     # Keyed with a version counter, bumped on a successful add -- otherwise
     # the uploader keeps showing the just-added file "staged" after the
-    # rerun (same stale-widget-state issue as the data_editor key fix
-    # above), which reads as if the upload never actually went through.
+    # rerun, which reads as if the upload never actually went through.
     if "doc_uploader_version" not in st.session_state:
         st.session_state.doc_uploader_version = 0
 
@@ -321,11 +303,9 @@ def _render_documents_tab() -> None:
         size_kb = stat.st_size / 1024
         modified = datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M")
         current_type = get_document_type(doc_path.name)
-        # [3, 3, 1], not the original [4, 2, 1] -- proven necessary by
-        # direct feedback: the Type dropdown was too narrow to read its
-        # own longest options ("Golden Frameworks & Sales Tactics",
-        # "Competitive & Internal Strategy") even once a choice was
-        # already selected, let alone while open.
+        # [3, 3, 1]: the Type column needs room for the longest options
+        # ("Golden Frameworks & Sales Tactics", "Competitive & Internal
+        # Strategy") to stay readable once selected.
         col1, col2, col3 = st.columns([3, 3, 1])
         with col1:
             st.markdown(f"**{doc_path.name}**")
@@ -400,15 +380,11 @@ def _render_approved_claims_tab() -> None:
 
     # A st.data_editor with a fixed key keeps its own {edited_rows,
     # added_rows, deleted_rows} diff in session_state, keyed by row
-    # POSITION -- and that diff survives across reruns (including
-    # navigating to a different page and back, since session_state
-    # outlives any one script run). After Save writes the shorter file
-    # and reruns, the stale diff still refers to the old row positions
-    # and gets silently re-applied on top of the fresh (already-correct)
-    # data on the next render -- which is exactly what made a deleted
-    # row appear to "come back". Bumping the key on every successful
-    # save forces Streamlit to treat it as a brand-new widget with no
-    # carried-over diff, so it starts clean from the just-saved data.
+    # position, and that diff survives across reruns. After Save writes
+    # the shorter file, the stale diff would otherwise still refer to old
+    # row positions and get silently re-applied on top of the fresh data --
+    # making a deleted row appear to "come back". Bumping the key on every
+    # save forces a brand-new widget with no carried-over diff.
     if "approved_claims_editor_version" not in st.session_state:
         st.session_state.approved_claims_editor_version = 0
 
@@ -519,10 +495,8 @@ def _render_restricted_claims_tab() -> None:
         st.success("Saved Restricted Claims. Enforcement updated immediately.")
         st.rerun()
 
-    # No separate "Remove an entry" selectbox+button here -- proven
-    # redundant by direct feedback: the data_editor above already lets
-    # a row be deleted directly (num_rows="dynamic"), so a second,
-    # separate removal control duplicated that with no real benefit.
+    # No separate "Remove an entry" selectbox+button here -- the data_editor
+    # above already lets a row be deleted directly (num_rows="dynamic").
 
     with st.expander("What does this page do?"):
         st.markdown(
@@ -788,12 +762,10 @@ def _render_deals_tab() -> None:
 
     # Fetched once and grouped in Python, rather than calling
     # list_requirements_for_deal/list_sales_aids_for_deal per deal inside
-    # the loop below -- that N+1 pattern (confirmed by testing, same
-    # class of bug already fixed in product_field_overrides.py and
-    # document_types.py) turned rendering N deals into 2N extra Postgres
-    # round trips. list_requirements/list_sales_aids already return
-    # everything in one query each; reversing each deal's group restores
-    # the oldest-first order the per-deal queries used.
+    # the loop below -- that N+1 pattern turns rendering N deals into 2N
+    # extra Postgres round trips. list_requirements/list_sales_aids already
+    # return everything in one query each; reversing each deal's group
+    # restores the oldest-first order the per-deal queries used.
     requirements_by_deal: dict[int, list[Any]] = {}
     for r in list_requirements(limit=1000):
         if r["deal_id"] is not None:
@@ -825,11 +797,9 @@ def _render_deals_tab() -> None:
             linked_requirements = requirements_by_deal.get(deal["id"], [])
             linked_sales_aids = sales_aids_by_deal.get(deal["id"], [])
 
-            # At-a-glance health row -- proven necessary by testing: a
-            # deal with zero requirements and zero sales aids previously
-            # showed nothing at all here (both expanders below only
-            # render once their count is non-zero), indistinguishable
-            # from a deal an admin just hadn't scrolled to yet.
+            # At-a-glance health row, since the expanders below only render
+            # once their count is non-zero -- without this, a deal with zero
+            # requirements and zero sales aids would show nothing at all.
             st.markdown(
                 theme.render_deal_status_badges(
                     recommendation["outcome"] if recommendation else None,
@@ -917,17 +887,12 @@ def _options_to_text(options: dict[str, str]) -> str:
 
 def _admin_selectable_segments(nomenclature) -> list[tuple[str, str, dict[str, str]]]:
     """Local copy of requirements_page._selectable_segments -- every
-    nomenclature segment with real decoded values, (segment_code,
-    label, {value_code: display text}) tuples. Deliberately NOT
-    imported from app.requirements_page here -- that module is a
-    Streamlit *page* (registered as an st.Page target in
-    streamlit_app.py), and importing from a page module while a
-    DIFFERENT page (Admin) is actively rendering was the prime suspect
-    for a real, reproducible bug: selecting a product here could leave
-    the Admin page showing a mix of stale and new tab content. Whether
-    or not that theory is the exact mechanism, duplicating this small,
-    pure function avoids the cross-page import entirely, which is a
-    safe, low-cost way to rule it out."""
+    nomenclature segment with real decoded values, (segment_code, label,
+    {value_code: display text}) tuples. Deliberately not imported from
+    app.requirements_page: that module is a Streamlit page (registered as
+    an st.Page target), and importing from a page module while a different
+    page (Admin) is rendering risks stale/mixed tab content, so this small,
+    pure function is duplicated here instead."""
     if not isinstance(nomenclature, dict):
         return []
     result = []
@@ -991,18 +956,12 @@ def _confirm_delete_generic_field_dialog(key: str, label: str) -> None:
 def _render_product_field_row(
     product_name: str, label: str, options: dict[str, str], is_ordering_code: bool, field_type: str = "select"
 ) -> None:
-    # Deliberately NO st.container(border=True) wrapper, and label +
-    # options collapsed into one markdown call instead of separate
-    # markdown/caption/caption calls -- proven necessary by direct
-    # feedback: the original, more deeply-nested per-row layout (a
-    # bordered container, 3 columns, 2-3 text elements each) pushed this
-    # page's total element count high enough that switching AWAY from
-    # this tab to a totally different one (e.g. Approved Claims) could
-    # leave that OTHER tab's real content sitting alongside orphaned,
-    # not-cleaned-up DOM from whatever tab was active before -- a
-    # Streamlit/React reconciliation issue tied to the SIZE of what
-    # changes in one rerun, not anything specific to this tab's logic.
-    # Fewer elements per row keeps the whole page's rerun delta smaller.
+    # Deliberately no st.container(border=True) wrapper, and label +
+    # options collapsed into one markdown call rather than separate
+    # markdown/caption/caption calls -- a high total element count on this
+    # page can leave stale DOM behind when switching tabs (a Streamlit/
+    # React reconciliation issue tied to the size of what changes in one
+    # rerun), so fewer elements per row keeps that risk down.
     edit_key = f"editing-product-{product_name}-{label}"
     editing = st.session_state.get(edit_key, False)
     if not editing:
@@ -1221,19 +1180,11 @@ def _render_requirements_form_fields_tab() -> None:
 
 
 def _render_requirements_admin_tab() -> None:
-    # No nested st.tabs() here -- proven necessary by direct feedback:
-    # a SECOND, inner st.tabs() nested inside this outer 6-tab group's
-    # own "Customer Requirements" tab was fragile in a way a single
-    # level of tabs isn't -- interacting with a widget deep inside the
-    # inner tabs (e.g. the Product picker below) could leave the page
-    # showing a completely different OUTER tab's content (e.g.
-    # "Documents") while "Customer Requirements" still showed as the
-    # visually active tab label. An st.fragment was tried as a fix and
-    # made it worse (real content bleeding between tabs, not just a
-    # timing flash), so it was reverted. Flattening to one level of
-    # tabs removes the specific nested-tabs interaction entirely.
-    # Submitted Requirements now lives in a collapsed expander instead
-    # of its own inner tab.
+    # No nested st.tabs() here -- a second, inner tabs group nested inside
+    # this outer 6-tab group is fragile: interacting with a widget deep
+    # inside it can leave the page showing a different outer tab's content
+    # while this tab's label still shows as active. Submitted Requirements
+    # lives in a collapsed expander instead of its own inner tab.
     with st.expander(f"Submitted Requirements ({len(list_requirements())})"):
         _render_requirements_records_tab()
     st.divider()

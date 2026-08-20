@@ -1,20 +1,14 @@
-"""Stores generated Sales Aids in a local SQLite database. Previously
-this page had zero persistence at all -- a result lived only in browser
-session state and was gone on refresh.
+"""Stores generated Sales Aids, one row per generation rather than a
+single "latest" slot -- unlike Discovery's recommendation (a single
+evolving verdict, see deals_store.save_recommendation), a rep can
+reasonably generate several distinct Sales Aids for the same deal over
+time (different competitors, different framing at different points in
+the sales cycle), and losing that history would throw away real,
+reusable material. Mirrors requirements_store.py's shape for the same
+reason requirements keeps full history too.
 
-One row per generation, not a single "latest" slot -- unlike Discovery's
-recommendation (a single evolving verdict, see deals_store.
-save_recommendation), a rep can reasonably generate several distinct
-Sales Aids for the same deal over time (different competitors, different
-framing at different points in the sales cycle), and losing that history
-would throw away real, reusable material. Mirrors requirements_store.py's
-shape for the same reason requirements keeps full history too.
-
-Includes the deal_id read side (list_sales_aids_for_deal) from the
-start -- a prior review of the deal system found that deal_id had been
-added to requirements.db but nothing ever queried it back out, so a
-deal's linked data was invisible everywhere except by writing raw SQL.
-Not repeating that here.
+Includes the deal_id read side (list_sales_aids_for_deal) so a deal's
+linked Sales Aids are queryable without raw SQL.
 
 Backed by Postgres (Neon) when app.db.is_postgres_enabled() -- see
 app.deals_store's module docstring for why.

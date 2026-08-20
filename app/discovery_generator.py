@@ -122,9 +122,7 @@ class RecommendationResult:
 _RIGHT_TO_WIN_TITLE_RE = re.compile(r"^Right to Win:\s*(.+)$", re.MULTILINE)
 
 # Single source of truth for both parse sites below (_parse_discovery_reply
-# and stream_discovery_points) -- proven necessary by testing: these used
-# to be two separately hardcoded lists, and it's exactly the kind of thing
-# that's easy to update in one and forget in the other.
+# and stream_discovery_points), so the two can't drift out of sync.
 _RIGHT_TO_WIN_SECTION_HEADERS = ["Why It Matters", "Supporting Evidence", "Discovery Questions"]
 
 
@@ -227,9 +225,9 @@ def stream_discovery_points(
     Lets a UI render each Right-to-Win card -- including its answer-
     capture boxes -- as soon as that point is actually done, instead of
     making a rep wait for the entire multi-point reply before seeing any
-    of them. Proven necessary by testing: a real reply can have 3-4
-    points with 3 questions each, and reading + starting to ask point 1's
-    questions doesn't need to wait on point 4 still being generated.
+    of them: a real reply can have 3-4 points with 3 questions each, and
+    reading + starting to ask point 1's questions doesn't need to wait on
+    point 4 still being generated.
 
     The very last point in the reply is never provably complete until the
     stream itself ends -- callers should parse it via
@@ -497,14 +495,12 @@ def _is_recommendable_product_document(document_name: str) -> bool:
     knowledge, not a purchasable product -- they're valid supporting
     evidence in stage 1's Right-to-Win discovery (real deployment history
     is good social proof), but must never be named as "the product" to
-    recommend here. Proven necessary by testing: for some use cases,
-    spreadsheet rows dominate the raw vector search (their prose reads a
-    lot like a discovery-call description) and crowd out actual product
-    documents entirely, and no prompt instruction alone reliably stopped
-    the LLM from citing the spreadsheet as if it were a product. Driven
-    by the explicit Admin-assigned document type, not a filename/suffix
-    guess -- this now also correctly rules out any reference document
-    (e.g. a technology or use-case guide), not just spreadsheets."""
+    recommend here -- spreadsheet rows can read a lot like a
+    discovery-call description and dominate raw vector search, and no
+    prompt instruction alone reliably stops the model from citing one as
+    if it were a product. Driven by the explicit Admin-assigned document
+    type, not a filename/suffix guess, so this rules out any reference
+    document, not just spreadsheets."""
     from app.document_types import is_product_catalogue
 
     return is_product_catalogue(document_name)
@@ -514,14 +510,11 @@ def _fetch_recommendable_matches(query: str, top_k: int) -> list[dict[str, Any]]
     """Retrieves real product documents only (see
     _is_recommendable_product_document), excluding non-product documents
     (e.g. the sales-history spreadsheet) from the vector search itself
-    rather than filtering them out of the results afterward. Proven
-    necessary by testing: for a use case phrased as a narrative (use case
-    description + interview-style answers concatenated), the spreadsheet's
-    rows -- which read a lot like a discovery-call description -- can
-    dominate the ranking so completely that they occupy the *entire*
-    top-k regardless of how wide it's fetched, leaving zero product
-    matches behind no matter how generous the over-fetch is. Excluding at
-    the query level guarantees the returned matches are usable."""
+    rather than filtering them out of the results afterward -- a
+    dominant non-product document can occupy the entire top-k regardless
+    of how wide it's fetched, leaving nothing usable behind no matter how
+    generous the over-fetch is. Excluding at the query level guarantees
+    the returned matches are usable."""
     from app.retriever import all_document_names, retrieve
 
     exclude = {name for name in all_document_names() if not _is_recommendable_product_document(name)}

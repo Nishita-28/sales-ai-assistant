@@ -78,13 +78,11 @@ def _render_recommend_outcome(product: str) -> None:
 
 
 def _save_discovery_answer(deal_id: int, question: str, widget_key: str) -> None:
-    """on_change callback for a Right-to-Win answer box -- saves the
-    updated answers dict (plus the current Right-to-Win points, so the
-    saved blob stays self-contained) straight to deals.db the moment the
-    rep commits an answer, same as qualification answers already do.
-    This is what actually fixes "leaving the page loses everything" --
-    the DB copy is current as of the rep's last committed answer, not
-    just as of the last full "Generate" click."""
+    """on_change callback for a Right-to-Win answer box -- saves the updated
+    answers dict (plus the current Right-to-Win points, so the saved blob
+    stays self-contained) straight to deals.db the moment the rep commits
+    an answer, so the DB copy is always current as of the last committed
+    answer, not just the last full "Generate" click."""
     answers = st.session_state.setdefault("discovery_answers", {})
     answers[question] = st.session_state.get(widget_key, "")
     st.session_state.discovery_answers = answers
@@ -96,19 +94,15 @@ def _save_discovery_answer(deal_id: int, question: str, widget_key: str) -> None
 def _render_right_to_win_card(
     i: int, point: RightToWinPoint, answers: dict[str, str], deal_id: int | None = None
 ) -> None:
-    """One Right-to-Win card -- title, a one-line "why it matters" (not
-    the full evidence paragraph -- proven necessary by feedback: showing
-    the full evidence inline for every point made a multi-point reply
-    long enough that a rep prepping for a call had to scroll past
-    several dense paragraphs just to reach the questions), the questions
-    to ask, and the detailed evidence tucked into a collapsed expander
-    for whoever wants to double-check the source. Shared by the live
+    """One Right-to-Win card -- title, a one-line "why it matters" (kept
+    short so a rep prepping for a call isn't scrolling past dense
+    paragraphs to reach the questions), the questions to ask, and the
+    detailed evidence tucked into a collapsed expander. Shared by the live
     (mid-stream) render (deal_id left as None -- transient cards during
-    generation don't save on every keystroke) and the persisted post-
-    generation render (deal_id passed through, so answers save
-    immediately) so the two look identical and a typed-ahead answer
-    survives the switch between them (same `answers` dict, same widget
-    key scheme)."""
+    generation don't save on every keystroke) and the persisted
+    post-generation render (deal_id passed through, so answers save
+    immediately), using the same `answers` dict and widget key scheme so a
+    typed-ahead answer survives the switch between them."""
     with st.container(border=theme.is_enterprise_theme()):
         st.markdown(f"**Right to Win #{i} -- {point.title}**")
 
@@ -146,12 +140,10 @@ def _render_right_to_win_card(
 
 
 def _save_qualification_answer(deal_id: int, field_key: str, widget_key: str) -> None:
-    """on_change callback for a qualification answer box -- saves
-    straight to deals.db the moment the rep commits an answer (Enter or
-    clicking away), same as any other st.text_input on_change in this
-    app. This is the actual "living intelligence": next time this deal
-    is opened, this field is no longer missing and won't be asked again
-    (see deals_store.missing_fields)."""
+    """on_change callback for a qualification answer box -- saves straight to
+    deals.db the moment the rep commits an answer, so next time this deal is
+    opened, this field is no longer missing and won't be asked again (see
+    deals_store.missing_fields)."""
     value = st.session_state.get(widget_key, "").strip()
     if value:
         update_deal_fields(deal_id, **{field_key: value})
@@ -198,12 +190,9 @@ def _load_saved_recommendation(deal_id: int | None) -> RecommendationResult | No
 
 
 def _load_saved_discovery(deal_id: int | None) -> tuple[DiscoveryResult | None, dict[str, str]]:
-    """The deal's last saved Right-to-Win generation and the rep's
-    answers against it, reconstructed from the stored blob -- or
-    (None, {}) if this deal has no saved generation yet. Proven
-    necessary by direct feedback: this used to be session-only, so
-    leaving the page (or just navigating to another page and back) lost
-    it entirely."""
+    """The deal's last saved Right-to-Win generation and the rep's answers
+    against it, reconstructed from the stored blob -- or (None, {}) if this
+    deal has no saved generation yet."""
     if deal_id is None:
         return None, {}
     deal = get_deal(deal_id)
@@ -244,15 +233,11 @@ def render_discovery_page() -> None:
 
     deal_id, customer_name, company, deal_use_case = render_deal_picker("discovery")
 
-    # Switching deals (or moving from an existing deal to "+ New deal")
-    # must not leave a previous deal's Right-to-Win results on screen --
-    # those belong to whichever deal was active when they were generated.
-    # Everything below is repopulated (not just cleared) from this
-    # deal's own last saved generation, if any -- Right-to-Win,
-    # qualification, and the recommendation all now persist to deals.db
-    # (see deals_store.save_discovery/save_qualification/
-    # save_recommendation), so reopening a deal shows what was last
-    # there instead of an empty page requiring a full regenerate.
+    # On a deal switch, repopulate (not just clear) from this deal's own
+    # last saved generation -- Right-to-Win, qualification, and
+    # recommendation all persist to deals.db (see deals_store.save_discovery/
+    # save_qualification/save_recommendation), so reopening a deal shows
+    # what was last there instead of an empty page.
     if st.session_state.get("active_deal_id") != deal_id:
         set_active_deal(deal_id)
         saved_result, saved_answers = _load_saved_discovery(deal_id)
@@ -261,27 +246,17 @@ def render_discovery_page() -> None:
         st.session_state.discovery_recommendation = _load_saved_recommendation(deal_id)
         st.session_state.discovery_qualification = _load_saved_qualification(deal_id)
 
-    # Everything below needs a real deal to attach to -- shown only once
-    # one exists, rather than rendering the use-case box and Generate
-    # button only for a rep to learn at click time that nothing can be
-    # generated without a deal. Same pattern as Sales Aid and Customer
-    # Requirements.
+    # Everything below needs an active deal to attach to.
     if deal_id is None:
         st.info("Pick an existing deal, or start a new one above (Customer Name + Company), to continue.")
         return
 
     # Auto-saves the draft to the deal on every commit (losing focus, or
-    # Ctrl+Enter) -- so alt-tabbing away, switching browser tabs, or
-    # clicking elsewhere never loses what's been typed. Deliberately does
-    # NOT also auto-trigger generation anymore -- an earlier version wired
-    # this same on_change to a "Ctrl+Enter submits" convenience, but
-    # Streamlit's on_change fires identically whether the box lost focus
-    # from Ctrl+Enter or from alt-tabbing away mid-sentence, and there's
-    # no way to tell those apart. Proven harmful by direct feedback: an
-    # alt-tab could fire a real generation off half-finished text, which
-    # then overwrote the box with that incomplete draft once it
-    # completed -- indistinguishable from "everything I typed vanished."
-    # Generation now only ever happens from the explicit button below.
+    # Ctrl+Enter) so switching tabs or clicking elsewhere never loses what's
+    # been typed. Does not auto-trigger generation -- Streamlit's on_change
+    # fires the same whether the box lost focus from Ctrl+Enter or simply
+    # alt-tabbing away, so generation only ever happens from the explicit
+    # button below.
     def _save_use_case_draft(deal_id: int | None, widget_key: str) -> None:
         if deal_id is not None:
             value = st.session_state.get(widget_key, "").strip()
@@ -312,25 +287,13 @@ def render_discovery_page() -> None:
                     matches, text_stream = stream_discovery_questions(use_case)
                     sources = dedupe_sources(matches)
 
-                # Renders each Right-to-Win card (title, evidence, answer
-                # boxes) the moment it's actually complete, instead of
-                # making a rep wait for the whole multi-point reply --
-                # only the point still being generated shows as raw
-                # streaming text, in its own box below whatever's already
-                # been rendered as real cards.
-                #
-                # Also saves to deals.db after each point completes, not
-                # just once the whole reply (plus qualification) is done.
-                # Proven necessary by direct feedback: a rep who clicked
-                # into a different sidebar page mid-generation -- to check
-                # something else, not even an alt-tab -- silently aborted
-                # this whole script run before it ever reached the
-                # original single end-of-generation save, discarding every
-                # Right-to-Win point that had already streamed in even
-                # though they were visibly complete on screen. Saving
-                # incrementally means whatever has actually finished
-                # generating is never more than one point away from being
-                # safe on disk.
+                # Renders each Right-to-Win card as soon as it's complete,
+                # instead of making a rep wait for the whole multi-point
+                # reply -- only the point still being generated shows as raw
+                # streaming text below the already-rendered cards. Also
+                # saves to deals.db after each point completes (not just once
+                # the whole reply is done), so navigating away mid-generation
+                # never loses points that already finished streaming.
                 live_answers: dict[str, str] = {}
                 completed_points: list[RightToWinPoint] = []
                 points_slot = st.container()
@@ -350,10 +313,7 @@ def render_discovery_page() -> None:
             except (RetrieverError, ResponseGeneratorError) as e:
                 st.error(f"Something went wrong generating questions: {e}")
             else:
-                # deal_id is guaranteed set here -- the page returns early
-                # above when it's None, and deal creation is fully owned
-                # by render_deal_picker()'s own atomic "Start New Deal"
-                # form (see app/deal_picker.py).
+                # deal_id is guaranteed set here; the page returns early above when it's None.
                 update_deal_fields(deal_id, use_case=use_case)
                 set_active_deal(deal_id)
                 result = finalize_discovery_questions(matches, raw_reply)
@@ -384,13 +344,9 @@ def render_discovery_page() -> None:
     result = st.session_state.get("discovery_result")
     saved_recommendation = st.session_state.get("discovery_recommendation")
 
-    # Only bail out with nothing at all to show. A saved recommendation
+    # Only bail out with nothing at all to show -- a saved recommendation
     # must still render even without fresh Right-to-Win results in this
-    # session -- proven necessary by testing: reopening a deal that
-    # already has a saved recommendation showed nothing at all, because
-    # this used to return early whenever `result` was empty, which is
-    # true for every deal until Right-to-Win is regenerated in the
-    # current session.
+    # session.
     if not result and not saved_recommendation:
         return
 

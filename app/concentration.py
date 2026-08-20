@@ -1,20 +1,18 @@
 """Hydrogen concentration as a domain value, not a primitive string or
 number. 100% LEL = 4% H2 v/v = 40,000 ppm is a fixed physical constant for
-hydrogen specifically -- confirmed identical, word-for-word, across every
-product catalogue in the approved knowledge base -- so one conversion
-ratio serves every product; this is not per-product data.
+hydrogen specifically, identical across every product catalogue in the
+approved knowledge base -- so one conversion ratio serves every product;
+this is not per-product data.
 
-Justified by two concrete, already-existing problems (not speculative):
-1. The Product Registry already stores range values that mix units within
-   one product's own table (e.g. PORTaHY: "2,000 PPM H2 v/v" alongside
+Two reasons this needs to be a real conversion, not left to the LLM:
+1. The Product Registry stores range values that mix units within one
+   product's own table (e.g. PORTaHY: "2,000 PPM H2 v/v" alongside
    "4% H2 v/v"), which is unusable for any "does this range cover X"
    comparison without a shared representation.
-2. The LLM was proven, by direct testing, to get the conversion arithmetic
-   wrong on an explicit conversion question (15,000 ppm computed as 6%
-   instead of the correct 1.5%) while stating it with High confidence --
-   the same class of problem as every other deterministic check in this
-   codebase: don't trust the model with something code can get exactly
-   right.
+2. A model can confidently compute conversion arithmetic wrong (e.g.
+   15,000 ppm as 6% instead of the correct 1.5%) -- the same class of
+   problem as every other deterministic check in this codebase: don't
+   trust the model with something code can get exactly right.
 """
 from __future__ import annotations
 

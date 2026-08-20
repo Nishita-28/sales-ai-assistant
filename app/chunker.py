@@ -83,21 +83,20 @@ def _reorder_headings_by_filename_match(headings: list[str], filename: str) -> l
     """A document can contain more than one plausible "heading" -- e.g. a
     floating text box's caption extracted ahead of the real title purely
     because of where it's anchored in the file, not because it's what a
-    reader would see first on the page. Proven necessary by testing: one
-    catalogue's header banner text ("PORTABLE H2 LEAK DETECTOR") got
-    extracted before its own title paragraph ("AURIGA"), so plain first-
-    heading order silently assigned the wrong product identity.
+    reader would see first on the page. Plain first-heading order can
+    silently assign the wrong product identity (e.g. a header banner like
+    "PORTABLE H2 LEAK DETECTOR" extracted before its own title paragraph,
+    "AURIGA").
 
     Sorts by how many filename tokens each heading shares, not merely
-    whether it shares any -- proven necessary by testing too: within one
-    product family (e.g. "FIXaHY"), several real headings all contain the
-    shared brand word, including an over-generic series-level banner
-    ("FIXaHY LEAK DETECTOR SERIES"). A boolean any-match can't tell that
-    apart from the actual specific model heading ("FIXaHY H2 LD XX"); an
-    overlap count can, since the specific heading shares every token
-    (brand + target gas + type) while the generic banner only shares the
-    brand. Stable otherwise, so a document with no match at all keeps its
-    original order."""
+    whether it shares any: within one product family (e.g. "FIXaHY"),
+    several real headings all contain the shared brand word, including an
+    over-generic series-level banner ("FIXaHY LEAK DETECTOR SERIES"). A
+    boolean any-match can't tell that apart from the actual specific model
+    heading ("FIXaHY H2 LD XX"); an overlap count can, since the specific
+    heading shares every token (brand + target gas + type) while the
+    generic banner only shares the brand. Stable otherwise, so a document
+    with no match at all keeps its original order."""
     distinctive = _distinctive_filename_tokens(filename)
     if not distinctive:
         return headings
@@ -440,14 +439,12 @@ def chunk_document(
 def chunk_approved_claims(document_name: str, bullets: list[str]) -> list[Chunk]:
     """One chunk per bullet -- deliberately bypasses chunk_document's
     general word-count packing (see DEFAULT_CHUNK_SIZE's own comment:
-    "how many short facts share a chunk"). That packing is a good
-    default for a document's prose, where nearby short facts usually
-    share context, but Approved Claims bullets are independent, atomic
-    facts spanning unrelated topics (certifications, warranty, pricing,
-    ...) -- proven necessary by testing: a bullet appended after three
-    AURIGA-related ones never surfaced for its own query at all, even
-    fully unscoped, because the shared chunk's embedding read as "about
-    AURIGA," burying everything else packed in with it."""
+    "how many short facts share a chunk"). That packing is a good default
+    for a document's prose, where nearby short facts usually share
+    context, but Approved Claims bullets are independent, atomic facts
+    spanning unrelated topics (certifications, warranty, pricing, ...):
+    packing them together lets one bullet's embedding dominate the shared
+    chunk, burying the others from their own queries."""
     total = len(bullets)
     return [
         Chunk(

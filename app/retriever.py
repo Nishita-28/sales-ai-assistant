@@ -295,8 +295,8 @@ def add_document_to_index(path: str | Path) -> tuple[int, list[str]]:
     the existing index -- other documents' chunks are left untouched.
     Returns (chunk_count, warnings) -- warnings are load_document()'s own
     coverage/structure checks (dropped cells, implausible header
-    detection), previously computed here and silently discarded instead
-    of ever reaching an admin. See document_loader.check_table_structure
+    detection), surfaced here so they reach an admin instead of being
+    silently discarded. See document_loader.check_table_structure
     for why a document can have real, serious problems -- a table's real
     header silently replaced by unrelated body text -- that produce zero
     dropped-cell warnings, since nothing is actually missing, just
@@ -446,19 +446,12 @@ def _is_single_product_document(document_name: str) -> bool:
     a generic word from it (e.g. "sensor", or an ordinary discovery
     question naturally containing "customer"/"use case") would otherwise
     get hard-scoped to only that document, silently excluding the actual
-    product catalogues it should be searching instead. Proven necessary
-    by testing twice: "Is the FIXaHY sensor PESO approved..." matched
-    "sensor" against the comparison document's own title; a Discovery
-    recommendation query matched "customer"/"use case" against the sales
-    log's own title, hard-scoping an entire recommendation to a
-    spreadsheet of past deals and finding nothing.
+    product catalogues it should be searching instead.
 
     Driven by the explicit Admin-assigned document type (app.document_types),
-    not filename pattern-matching -- the old filename-keyword heuristic
-    ("eligible unless the name contains comparison/competitor/guide, or
-    ends in .xlsx") silently misclassified two different reference
-    documents as products this session, purely because their filenames
-    didn't happen to contain the magic keyword."""
+    not filename pattern-matching -- a filename-keyword heuristic is too
+    easy to fool by a reference document whose name just doesn't happen
+    to contain the expected keyword."""
     from app.document_types import is_product_catalogue
 
     return is_product_catalogue(document_name)
@@ -545,11 +538,8 @@ _AMBIGUOUS_REFERENCE_RE = re.compile(
 # detector" -- grammatically the same shape _AMBIGUOUS_REFERENCE_RE
 # matches ("the [word] product"), but a fundamentally different intent:
 # not confusion about which single, already-existing thing is meant, but
-# a deliberate request to rank/compare across the whole catalog. Proven
-# necessary by testing: "which is the lightest product MNST sells" hit
-# the generic "Could you specify which product?" message, which doesn't
-# even make sense as a response to a question that already covers every
-# product by construction.
+# a deliberate request to rank/compare across the whole catalog, which
+# shouldn't trigger a "could you specify which product?" clarification.
 _SUPERLATIVE_RE = re.compile(
     r"\b(most|least)\s+\w+|\b\w{4,}est\b|\b(better|best|worse|worst)\b",
     re.IGNORECASE,
@@ -569,19 +559,12 @@ def _product_types_from_registry() -> dict[str, str]:
     """Product name -> lowercased product_type ("leak detector"/
     "analyzer"), read from the same auto-extracted Product Index
     dispatcher.py and registry_builder.py already maintain -- not a
-    second, hand-maintained mapping. Proven necessary by testing: a
-    hand-maintained dict here (see git history) had silently drifted out
-    of sync with the real, auto-extracted product names -- still keyed
-    "AURIGA PORTABLE H2 LEAK DETECTOR" and "PORTaHY SERIES" instead of
-    the actual current names "AURIGA" and "PORTaHY H2 LD XX" -- so a
-    fully-named AURIGA question ("...a portable or a fixed detector?")
-    wasn't recognized as already naming a leak detector, and the
-    "detector" reference got wrongly flagged ambiguous between the two
-    OTHER products this stale dict still recognized. registry_builder's
-    "Leak Detector"/"Analyzer" vocab is lowercased here to match this
-    module's own comparison convention. Falls back to an empty mapping if
-    the registry isn't built yet, same as every other registry-dependent
-    check in this codebase."""
+    second, hand-maintained mapping that could drift out of sync with
+    the real product names. registry_builder's "Leak Detector"/"Analyzer"
+    vocab is lowercased here to match this module's own comparison
+    convention. Falls back to an empty mapping if the registry isn't
+    built yet, same as every other registry-dependent check in this
+    codebase."""
     try:
         from app.product_index import load_product_index
         products, _ = load_product_index()
@@ -754,17 +737,12 @@ def is_self_referential_without_own_products(
     company's own products, positioning, capabilities, offerings...) but
     every retrieved match comes from a reference document (competitor
     comparison, historical sales log, etc. -- see
-    _is_single_product_document) rather than an actual product
-    catalogue. Proven necessary by testing: asked "What is our hydrogen
-    detection positioning?", retrieval returned 11/11 chunks from the
-    competitor-comparison document and zero from any real product
-    catalogue, and the model answered by describing a named competitor's
-    (MSA) products as this company's own -- a prompt instruction telling
-    it not to do this was tried first and reproducibly failed to
-    prevent it (same class of problem as the ambiguous-product-reference
-    and ungrounded-email checks: an attribution error, not a wording
-    problem, so it needs a deterministic check on what was actually
-    retrieved rather than another prompt instruction)."""
+    _is_single_product_document) rather than an actual product catalogue.
+    A self-referential question retrieved entirely from a competitor
+    document risks the model describing the competitor's own products as
+    this company's -- an attribution error a prompt instruction alone
+    can't reliably prevent, so it needs a deterministic check on what was
+    actually retrieved."""
     if not _SELF_REFERENTIAL_RE.search(query):
         return False
     if not matches:
@@ -784,12 +762,10 @@ def _interleave_balanced_matches(
     product (which still buries every product but the first behind a
     wall of one product's content) or a plain similarity sort (which
     silently re-introduces the exact per-product domination
-    _retrieve_balanced_across_products exists to prevent). Confirmed by
-    testing: for "auriga vs fixahy", keyword-boost added 3 more chunks to
-    AURIGA specifically (already the highest-scoring product), and a
-    subsequent global sort pushed 2 of the 4 compared products' chunks to
-    position 17+ of a 43-chunk context -- the LLM then only discussed the
-    2 products it saw first."""
+    _retrieve_balanced_across_products exists to prevent): a global sort
+    can push a lower-scoring product's chunks far enough down a large
+    context that the model only discusses whichever products it saw
+    first."""
     by_product: dict[str, list[dict[str, Any]]] = {}
     for m in matches:
         by_product.setdefault(m["metadata"].get("product_name"), []).append(m)
@@ -929,29 +905,26 @@ def retrieve(
     results) -- for a caller that already knows some documents can never
     be a valid answer (e.g. discovery_generator.py excluding the sales-
     history spreadsheet from product recommendations), filtering after
-    the fact isn't enough: proven by testing, a dominant non-product
-    document can occupy the entire top-k regardless of how wide it's
-    fetched, leaving nothing real behind after post-hoc filtering.
+    the fact isn't enough: a dominant non-product document can occupy the
+    entire top-k regardless of how wide it's fetched, leaving nothing
+    real behind after post-hoc filtering.
 
     scope_to_products=False skips narrowing to a single detected product
     entirely -- for callers that need breadth across multiple MNST
     products AND non-product documents (e.g. a competitor comparison) in
-    the same call, like sales_aid_generator.py. Confirmed by testing: a
-    comparison query naming both a use case and a competitor technology
-    can still match one MNST product's distinctive tokens, which then
-    silently scopes the ENTIRE top_k to that one product's chunks and
-    excludes the competitor-comparison document completely.
+    the same call, like sales_aid_generator.py. Without it, a comparison
+    query that happens to match one MNST product's distinctive tokens
+    can silently scope the entire top_k to that one product and exclude
+    the competitor-comparison document completely.
 
     mentioned_products, when given, is used in place of this function's
     own _mentioned_products_for_query detection -- for a caller (the
     dispatcher) that already resolved which products the query names
     with better information than exact-token matching can (e.g. fuzzy
-    typo tolerance: "porthay" for PORTaHY). Proven necessary by testing:
-    even after dispatcher.py excluded every other product's document,
-    this function's own re-detection still came back with only the one
-    exact-matched product, which then filtered the surviving pool down
-    to just that product's chunks by product_name -- silently undoing
-    the caller's own, more complete answer instead of using it."""
+    typo tolerance: "porthay" for PORTaHY). Without this, the function's
+    own re-detection can come back narrower than the caller's resolution
+    and silently filter the surviving pool down to fewer products than
+    the caller intended."""
     collection = get_collection()
 
     try:
@@ -970,12 +943,11 @@ def retrieve(
 
     # mentioned_products is None checked first: when the caller (the
     # dispatcher) has already resolved specific products, that decision
-    # must win over this function's own, older "list every document"
-    # shortcut. Proven necessary by testing: "compare auriga and all
-    # fixahy products" contains "all"/"products", which _is_list_all_
-    # products_query reads as a request to list literally every document
-    # in the whole collection -- silently discarding the dispatcher's
-    # correct 4-product scoping and exclusion entirely.
+    # must win over this function's own "list every document" shortcut --
+    # a query like "compare auriga and all fixahy products" still
+    # contains "all"/"products" and would otherwise be read as a request
+    # to list every document in the collection, discarding the
+    # dispatcher's correct product scoping.
     if mentioned_products is None and _is_list_all_products_query(query):
         try:
             matches = _retrieve_one_per_document(query_embedding, collection)
@@ -1028,7 +1000,7 @@ def retrieve(
             # first behind a wall of one product's content. A plain
             # similarity sort would be even worse: it would silently undo
             # the fairness _retrieve_balanced_across_products just built
-            # (confirmed by testing -- see _interleave_balanced_matches).
+            # (see _interleave_balanced_matches).
             matches = _interleave_balanced_matches(matches, mentioned)
         elif boosted:
             matches.sort(key=lambda m: m["similarity"], reverse=True)
@@ -1037,10 +1009,10 @@ def retrieve(
             # Supplement with a genuinely unscoped pass (respecting only
             # exclude_where, not the product_name restriction) appended
             # after whatever's already in matches, never mixed into the
-            # ranked/interleaved order. Proven necessary by testing, two
-            # ways: (1) dispatcher.py forces mentioned_products to every
-            # currently approved product for a question naming no specific
-            # one (e.g. "what industries use the fixed hydrogen leak
+            # ranked/interleaved order. Two reasons this matters: (1)
+            # dispatcher.py forces mentioned_products to every currently
+            # approved product for a question naming no specific one
+            # (e.g. "what industries use the fixed hydrogen leak
             # detector"), so that a spec comparison gets fair per-product
             # coverage -- but _retrieve_balanced_across_products queries
             # strictly by product_name, which structurally can never

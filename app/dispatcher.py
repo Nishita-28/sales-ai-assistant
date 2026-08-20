@@ -54,16 +54,14 @@ _LIST_ALL_RE = re.compile(
 )
 
 # "which/what products ..." on its own is NOT safe to answer with the
-# whole catalog when no real attribute matches -- proven necessary by
-# testing: "which product is the lightest" and "which products are the
-# cheapest/fastest" all share this surface shape with a genuine filter
-# question ("which products use SSEC"), but ask about a spec (weight,
-# price, speed) the Product Index doesn't track at all. The earlier
-# design point (requiring an attribute match for a WEAKER "tell me
-# about" phrasing) generalizes here too: this phrasing only produces an
-# answer when _match_all_attributes() actually finds something (see
-# dispatch()) -- with no match, it falls through to real search instead
-# of a confidently wrong "here's everything" non-answer.
+# whole catalog when no real attribute matches: "which product is the
+# lightest" and "which products are the cheapest/fastest" share this
+# surface shape with a genuine filter question ("which products use
+# SSEC"), but ask about a spec (weight, price, speed) the Product Index
+# doesn't track at all. This phrasing only produces an answer when
+# _match_all_attributes() actually finds something (see dispatch()) --
+# with no match, it falls through to real search instead of a confidently
+# wrong "here's everything" non-answer.
 _WHICH_WHAT_PRODUCTS_RE = re.compile(
     r"\b(which|what) (products|sensors|detectors|devices|analyzers|units)\b",
     re.IGNORECASE,
@@ -81,18 +79,14 @@ _ASK_ABOUT_RE = re.compile(
 )
 
 # Same weak-trigger treatment as _ASK_ABOUT_RE, for bare "list"/"show"
-# phrasings that don't say "list all" -- e.g. "list analyzers". Proven
-# necessary by testing: "list analyzers" named a real, tracked product_type
-# value ("Analyzer") but fell through this dispatcher entirely because
-# _LIST_ALL_RE requires the literal "list all" and _WHICH_WHAT_PRODUCTS_RE
-# requires a "which/what" framing -- neither present here. That sent an
-# unscoped, all-6-products retrieval to the LLM, which (correctly following
-# the system prompt's distinct-device rule) produced a verbose per-product
-# checklist instead of the one-line deterministic answer the Product Index
-# already had. Only trusted alongside a real attribute match, same as
-# _ASK_ABOUT_RE, so a bare "list"/"show" with no real filter still falls
-# through to the existing safe behavior instead of misfiring on some
-# unrelated request.
+# phrasings that don't say "list all" -- e.g. "list analyzers" names a
+# real, tracked product_type value but neither _LIST_ALL_RE (needs the
+# literal "list all") nor _WHICH_WHAT_PRODUCTS_RE (needs a "which/what"
+# framing) catches it on its own, which without this would fall through
+# to an unscoped, all-products retrieval instead of the deterministic
+# Product Index answer. Only trusted alongside a real attribute match,
+# same as _ASK_ABOUT_RE, so a bare "list"/"show" with no real filter
+# still falls through to the existing safe behavior.
 _LIST_KEYWORD_RE = re.compile(r"\b(list|show)\b", re.IGNORECASE)
 
 # A question asking about "the [attribute] sensor/detector/..." as if it
@@ -136,15 +130,11 @@ class DispatchResult:
     scoped_product_names: Optional[list[str]] = None
     # Every scoped product's complete ordering-configuration table,
     # attached unconditionally rather than only when a question's wording
-    # happens to trigger a lookup. Proven necessary by testing: "What
-    # configuration options are available for the AURIGA series?" got a
-    # plausible answer describing UI/feature prose while omitting the
-    # actual orderable codes (AURIGA's Range Full Scale: 5K/5%/10%)
-    # entirely, because ordinary semantic retrieval didn't rank that
-    # chunk highly enough -- and there's no reliable way to predict every
-    # phrasing ("configuration options", "XX values", "variants",
-    # "models"...) a rep might use to ask for it. The data is already
-    # fully known and cheap to include, so it's always included.
+    # happens to trigger a lookup -- ordinary semantic retrieval doesn't
+    # reliably rank the ordering-code chunk highly enough, and there's no
+    # way to predict every phrasing ("configuration options", "XX values",
+    # "variants", "models"...) a rep might use to ask for it. The data is
+    # already known and cheap to include, so it's always included.
     nomenclature_notes: Optional[list[dict[str, str]]] = None
 
 
@@ -153,11 +143,8 @@ def _contains_term(term: str, text: str) -> bool:
     non-word character (e.g. alias "Auriga 10%") -- plain \\b alone fails
     right after a symbol at the very end of a string, since \\b needs a
     transition between a word and non-word character, and a symbol
-    followed by nothing is non-word on both sides. Proven necessary by
-    testing: "what is auriga 10%" matched bare "AURIGA" only, silently
-    missing the more specific "Auriga 10%" alias and falling back to
-    scoped generation instead of the direct decode answer. Negative
-    lookaround on alphanumerics doesn't have that blind spot."""
+    followed by nothing is non-word on both sides. Negative lookaround on
+    alphanumerics doesn't have that blind spot."""
     return re.search(r"(?<![a-zA-Z0-9])" + re.escape(term.lower()) + r"(?![a-zA-Z0-9])", text) is not None
 
 
@@ -181,13 +168,10 @@ def _match_attribute(query: str, tech_aliases: dict[str, str]) -> Optional[tuple
 def _match_all_attributes(query: str, tech_aliases: dict[str, str]) -> list[tuple[str, str]]:
     """Every (field, value) filter the query names, not just the first --
     e.g. "list all SSEC and MEMS products" names two technology values at
-    once. Proven necessary by testing: _match_attribute (which stops at
-    the first hit, used elsewhere for a simple yes/no "does this name an
-    attribute at all" check) silently dropped "MEMS" whenever "SSEC" also
-    matched, understating a "list all X and Y" query down to just X --
-    the same silent-truncation failure this whole effort exists to
-    prevent, just triggered by naming two filter values instead of zero
-    or one."""
+    once. _match_attribute stops at the first hit (fine for its own
+    yes/no "does this name an attribute at all" use elsewhere), which
+    would otherwise understate a "list all X and Y" query down to just
+    X."""
     query_lower = query.lower()
     found: list[tuple[str, str]] = []
     seen: set[tuple[str, str]] = set()
@@ -285,14 +269,11 @@ def _scoped_result(
     hand-written return statements already once did.
 
     exclude_references=True (the default) also excludes every reference
-    document (competitor comparison, historical sales, use-case guide) --
-    proven necessary by testing: asked specifically about the FIXaHY H2
-    LD by name, the answer's sources included two chunks from the
-    Competitor Comparison document (Dräger, Figaro, Infineon competitor
-    products) purely because that document was never in the Product
-    Registry to begin with, so it was never in the "other catalogues to
-    exclude" set at all. A question naming one or more specific products
-    has no legitimate reason to draw on a cross-vendor comparison sheet.
+    document (competitor comparison, historical sales, use-case guide),
+    since none of them are in the Product Registry and so were never in
+    the "other catalogues to exclude" set on their own. A question naming
+    one or more specific products has no legitimate reason to draw on a
+    cross-vendor comparison sheet.
     The one caller that wants reference docs to stay eligible -- no
     specific product named at all, balancing across the whole catalog --
     passes exclude_references=False explicitly."""
@@ -320,8 +301,7 @@ def _answer_catalog_query(
     """Path 2 -- Catalog Queries. Filters the Product Index deterministically
     and states the complete, exact matching set directly -- never a second
     retrieval pass, so a real match can't be silently dropped by top-k
-    truncation the way plain-RAG enumeration was (the original bug this
-    whole effort traces back to)."""
+    truncation the way plain-RAG enumeration would."""
     matches = _match_all_attributes(query, tech_aliases)
     if matches:
         matching_by_name: dict[str, ProductIndexEntry] = {}
@@ -392,19 +372,18 @@ def _matching_products(query: str, products: list[ProductIndexEntry]) -> list[tu
     alias is wholly subsumed by a different product's longer match (e.g.
     the bare brand root "FIXaHY" also matching the Analyzer and 4220MA
     when the query actually said the more specific "FIXaHY H2 LD V").
-    Proven necessary by testing: without this, adding the bare brand-root
-    alias (needed so "PORTaHY" alone resolves, and so a genuine
-    multi-product comparison isn't miscounted as one product) caused a
-    single, fully-coded product mention to be diluted into 3 matches
-    instead of resolving cleanly to the one actually named.
+    Without this, the bare brand-root alias (needed so "PORTaHY" alone
+    resolves, and so a genuine multi-product comparison isn't miscounted
+    as one product) would dilute a single, fully-coded product mention
+    into several matches instead of resolving cleanly to the one
+    actually named.
 
-    Falls back to fuzzy brand matching (_fuzzy_brand_match) for any
-    product no exact alias caught -- proven necessary by testing: "auriga
-    vs porthay" (a typo for PORTaHY) matched only AURIGA on exact
-    aliases, and the caller's "exactly one match" scoping logic then
-    hard-excluded PORTaHY's real catalogue from retrieval entirely,
-    producing a confident "no information" answer instead of an honest
-    comparison."""
+    Falls back to fuzzy brand matching (_fuzzy_brand_match) for any product
+    no exact alias caught -- a typo like "porthay" for PORTaHY would
+    otherwise match nothing, and the caller's "exactly one match" scoping
+    logic would hard-exclude that product's real catalogue from retrieval
+    entirely, producing a confident "no information" answer instead of an
+    honest comparison."""
     query_lower = query.lower()
     found: list[tuple[ProductIndexEntry, str]] = []
     for p in products:
@@ -500,12 +479,10 @@ def _extract_field(value_text: str, field_label: str) -> Optional[str]:
     """Pulls one specific field's value out of a "Field: value; Field:
     value; ..." structured description -- e.g. asked only for
     "resolution", returns just "5 ppm" instead of the whole Start/Span/
-    Resolution/MDL/Accuracy block. Proven necessary by testing: "portahy
-    h2 ld 5k what is the resolution" returned the entire segment
-    description when only one field was actually asked about. None if
-    value_text isn't structured this way (e.g. a plain Output Signal
-    meaning like "Analogue Voltage Output" has no "Field: value" shape
-    to extract from) or doesn't contain the requested field."""
+    Resolution/MDL/Accuracy block. None if value_text isn't structured
+    this way (e.g. a plain Output Signal meaning like "Analogue Voltage
+    Output" has no "Field: value" shape to extract from) or doesn't
+    contain the requested field."""
     for part in value_text.split(";"):
         part = part.strip()
         if ":" not in part:
@@ -575,10 +552,6 @@ def dispatch(question: str) -> Optional[DispatchResult]:
         # registry) -- scoping to only the one recognized product would
         # silently hide the other side of the comparison and produce a
         # confident wrong answer instead of an honest broader search.
-        # Proven necessary by testing: "auriga vs porthay" (a typo for
-        # PORTaHY) matched only AURIGA, and hard-scoping to just AURIGA's
-        # catalogue made the model claim it had no comparison information
-        # at all, when PORTaHY's real data was simply excluded, not absent.
         looks_like_catalog_question = bool(_LIST_ALL_RE.search(question)) or bool(_WHICH_WHAT_PRODUCTS_RE.search(question))
         if not looks_like_catalog_question and not _COMPARISON_SIGNAL_RE.search(question):
             return _scoped_result(products, [product])
@@ -609,12 +582,9 @@ def dispatch(question: str) -> Optional[DispatchResult]:
     # time: the rep can still narrow down with a follow-up, but a dead
     # end wastes their turn for no benefit, since every real candidate is
     # already known and generation is already grounded per-product by
-    # citation. Proven necessary by testing: "FIXaHY vs PORTaHY" (spelled
-    # correctly, no ambiguity about PORTaHY at all) still got blocked by
-    # "Could you clarify..." purely because "FIXaHY" alone spans 3 real
-    # products -- repeatedly, across many different phrasings, since a
-    # clarification-by-default can never be phrased around, only
-    # special-cased one trigger word at a time. An explicit "list all X"
+    # citation -- a bare brand root like "FIXaHY" spanning 3 real products
+    # shouldn't force a clarification when the query is otherwise
+    # unambiguous. An explicit "list all X"
     # style request (is_list_request) is the one exception: a deliberate
     # enumeration should get the deterministic, complete name list, not
     # LLM prose.

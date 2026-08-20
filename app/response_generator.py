@@ -344,13 +344,10 @@ def _full_catalog_coverage_note(matches: list[dict[str, Any]]) -> Optional[str]:
     """When retrieval was deliberately balanced across every currently
     approved product (see dispatcher.py's "no specific product named"
     fallback -- it forces exactly this), tells the model explicitly which
-    products were checked. Proven necessary by testing: asked "how much
-    time does each device take to charge," retrieval correctly covered
-    all 6 products, but the model found charging-relevant content for
-    only 2 of them and silently said nothing about the other 4 (fixed,
-    wall-powered products with no battery/charging concept at all) --
-    reading as if only those 2 were ever considered, not as a complete,
-    deliberate check that correctly found nothing relevant for the rest."""
+    products were checked. Without this, a product with genuinely no
+    relevant content (e.g. a fixed, wall-powered product with no
+    battery/charging concept) reads as if it was never considered at all,
+    rather than as a deliberate check that correctly found nothing."""
     try:
         from app.product_index import load_product_index
         products, _ = load_product_index()
@@ -405,10 +402,10 @@ def stream_answer(
     all, if retrieval found nothing usable, or AMBIGUOUS_PRODUCT_MESSAGE
     once, also without calling the LLM, if the question refers to "this"/
     "it"/"the sensor" without naming a real product -- a deterministic
-    check, not a prompt instruction, since testing showed the model
-    reliably invents a product to answer about rather than asking which
-    one was meant (retrieval finding topically-similar chunks isn't the
-    same as the user having named a product), or NO_SOURCE_MESSAGE again
+    check, not a prompt instruction, since the model tends to invent a
+    product to answer about rather than asking which one was meant
+    (retrieval finding topically-similar chunks isn't the same as the
+    user having named a product), or NO_SOURCE_MESSAGE again
     if the question is self-referential ("our"/"we"/"us"/"the company")
     but every retrieved match came from a reference document rather than
     an actual product catalogue -- retrieving topically-related
@@ -421,16 +418,11 @@ def stream_answer(
 
     skip_ambiguity_check=True skips is_ambiguous_product_reference() --
     for a caller (rag_pipeline.py) whose dispatcher already resolved this
-    question's product reference deterministically (kind="scoped"), which
-    this older, independent, weaker check knows nothing about. Proven
-    necessary by testing: asked "what is the warranty of the mEMS
-    device," dispatcher.py correctly resolved "MEMS" to VISION H2 LD XX
-    (the only current MEMS product) and scoped retrieval to just its
-    catalogue -- but this function still re-ran its own ambiguity check
-    on the raw question text regardless, which doesn't know about
-    technology-alias resolution and produced the generic "Could you
-    specify which product?" message anyway, discarding a correct answer
-    dispatch() had already found."""
+    question's product reference deterministically (kind="scoped"). That
+    resolution can use information (e.g. technology-alias matching) this
+    function's own, independent ambiguity check doesn't have, so without
+    skipping it a correctly-scoped answer can still get discarded in
+    favor of a generic "Could you specify which product?" message."""
     matches = retrieval.get("matches") or []
     retrieval_confidence = retrieval.get("confidence", "none")
 
@@ -454,12 +446,11 @@ def stream_answer(
         user_message += "\n\n" + coverage_note
 
     # Hydrogen concentration unit conversion is arithmetic, not something to
-    # trust the model with -- proven necessary by testing: asked to convert
-    # 15,000 ppm to %LEL, the model computed 6% / 150% LEL instead of the
-    # correct 1.5% / 37.5% LEL, while stating it with High confidence. The
-    # conversion ratio (100% LEL = 4% H2 v/v = 40,000 ppm) is computed here
-    # in code and handed to the model as a fact to state, not a calculation
-    # to perform.
+    # trust the model with: asked to convert 15,000 ppm to %LEL, a model can
+    # confidently compute 6% / 150% LEL instead of the correct 1.5% / 37.5%
+    # LEL. The conversion ratio (100% LEL = 4% H2 v/v = 40,000 ppm) is
+    # computed here in code and handed to the model as a fact to state, not
+    # a calculation to perform.
     conversion = detect_conversion_request(question)
     if conversion is not None:
         concentration, target_unit = conversion
@@ -478,17 +469,12 @@ _EMAIL_RE = re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+")
 
 def _contains_ungrounded_email(answer_text: str, source_text: str) -> bool:
     """True if the answer states an email address that doesn't literally
-    appear anywhere in the retrieved source text. Proven necessary by
-    testing: asked "Can I get a demo unit?", the model answered with a
-    specific, real-looking contact email and phone number attributed to
-    a named product -- reproducibly -- even though neither appeared in
-    the excerpts actually retrieved for that question. Since MNST is a
-    real company, the model can recall genuine contact details from its
-    own general knowledge rather than the given context, which is
-    exactly the kind of claim "answer only from the approved excerpts"
-    is meant to rule out but doesn't reliably on its own (same class of
-    problem as the ambiguous-product-reference check -- a deterministic
-    check on the finished answer, not another prompt instruction)."""
+    appear anywhere in the retrieved source text. Since MNST is a real
+    company, the model can recall genuine-looking contact details from
+    its own general knowledge instead of the given context -- exactly the
+    kind of claim "answer only from the approved excerpts" is meant to
+    rule out but can't reliably enforce through the prompt alone, so this
+    is a deterministic check on the finished answer instead."""
     for email in _EMAIL_RE.findall(answer_text):
         if email.lower() not in source_text.lower():
             return True

@@ -33,18 +33,13 @@ def render_sales_aid_page() -> None:
 
     deal_id, customer_name, company, deal_use_case = render_deal_picker("sales_aid")
 
-    # Switching deals must not leave a previous deal's generated sales
-    # aid on screen mislabeled as if it belonged to the newly selected
-    # one -- same lesson as Discovery's Right-to-Win results.
+    # Reset on deal switch so a previous deal's generated sales aid doesn't
+    # linger on screen mislabeled as belonging to the new one.
     if st.session_state.get("active_deal_id") != deal_id:
         set_active_deal(deal_id)
         st.session_state.pop("sales_aid_result", None)
 
-    # Everything below (use case, product picker, compare-against,
-    # generate button, and any previously generated result) needs a real
-    # deal to attach to -- shown only once one exists, rather than
-    # rendering an unusable form a rep could fill in and only then learn
-    # it can't submit without picking or starting a deal first.
+    # Everything below needs an active deal to attach to.
     if deal_id is None:
         st.info("Pick an existing deal, or start a new one above (Customer Name + Company), to continue.")
         return
@@ -55,11 +50,8 @@ def render_sales_aid_page() -> None:
         products = []
     product_names = sorted({p.product_name for p in products})
 
-    # st.form so Enter in "Compare against" submits like clicking the button
-    # does -- a plain text_input + separate button doesn't submit on Enter.
-    # Keyed per-deal (not a fixed key) so switching deals swaps in that
-    # deal's own saved use case, same reason Discovery's use-case box is
-    # deal-scoped.
+    # st.form so Enter submits the same as clicking the button. Keyed
+    # per-deal so switching deals loads that deal's own saved use case.
     with st.form(f"sales_aid_form_{deal_id}"):
         use_case = st.text_area("Use case / scenario", value=deal_use_case, placeholder=EXAMPLE_USE_CASE, height=100)
         mnst_products = st.multiselect(
@@ -87,8 +79,7 @@ def render_sales_aid_page() -> None:
             except (RetrieverError, ResponseGeneratorError) as e:
                 st.error(f"Something went wrong generating the sales aid: {e}")
             else:
-                # deal_id is guaranteed set here -- the function returned
-                # early above when it was None.
+                # deal_id is guaranteed set here; the function returns early above when it's None.
                 update_deal_fields(deal_id, use_case=use_case)
                 set_active_deal(deal_id)
 
@@ -151,12 +142,9 @@ _TABLE_SEPARATOR_RE = re.compile(r":?-+:?")
 
 
 def _parse_markdown_table(lines: list[str]) -> list[list[str]]:
-    """result.comparison is the raw markdown table the LLM produced
-    (header, separator, data rows, pipe-delimited) -- this turns it back
-    into plain rows of cell text, dropping the "|---|---|" separator row,
-    so it can be rebuilt as a real docx table instead of exported as
-    literal pipe characters (which is what made the old .txt download's
-    table unreadable in Notepad/Word)."""
+    """Converts the LLM's raw pipe-delimited markdown table (result.comparison)
+    into plain rows of cell text, dropping the "|---|---|" separator row, so it
+    can be rebuilt as a real docx table."""
     rows = []
     for line in lines:
         line = line.strip()
@@ -170,11 +158,8 @@ def _parse_markdown_table(lines: list[str]) -> list[list[str]]:
 
 
 def _sales_aid_as_docx(result) -> bytes:
-    """Word export of the full sales aid -- a real docx table for the
-    comparison (correct alignment in Word/Google Docs/Outlook, unlike a
-    plain-text export of markdown pipe syntax), matching the page's own
-    stated purpose: something to hand to a customer's technical champion
-    to circulate internally."""
+    """Word export of the sales aid, with the comparison as a real docx table
+    for correct alignment in Word/Google Docs/Outlook."""
     doc = Document()
     doc.add_heading(result.title or "Sales Aid", level=1)
 

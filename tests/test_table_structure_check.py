@@ -1,11 +1,8 @@
 """Tests for check_table_structure (app/document_loader.py) -- flags a
 table whose detected header/column name is implausibly long, the signal
-for a real, confirmed failure mode: the multi-row-header detector
-merging unrelated body text into what it thinks is a header, silently
-burying real data underneath it. Proven on real approved catalogues --
-see the module-level comment above check_table_structure for the exact
-case (a ~300-character footnote paragraph became the "name" of every
-column in a product spec table).
+for the multi-row-header detector merging unrelated body text into what
+it thinks is a header, silently burying real data underneath it. See the
+module-level comment above check_table_structure for more detail.
 
 check_table_coverage (dropped-cell detection) does NOT catch this class
 of problem -- every character is still present, just organized wrong --
