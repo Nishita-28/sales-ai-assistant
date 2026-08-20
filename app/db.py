@@ -78,8 +78,9 @@ def _get_pool() -> ConnectionPool:
                 url,
                 min_size=1,
                 max_size=5,
-                kwargs={"row_factory": dict_row},
+                kwargs={"row_factory": dict_row, "connect_timeout": 10},
                 open=True,
+                timeout=15,
             )
         except Exception as e:
             raise DatabaseUnavailableError(f"Could not connect to the Postgres database: {e}") from e
