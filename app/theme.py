@@ -180,8 +180,8 @@ _CSS = """
   --mnst-ink-900: #f4f7fc;
   --mnst-ink-700: #c9d4e8;
   --mnst-ink-500: #93a3c4;
-  --mnst-border: rgba(255, 255, 255, 0.35);
-  --mnst-border-strong: rgba(255, 255, 255, 0.6);
+  --mnst-border: rgba(255, 255, 255, 0.5);
+  --mnst-border-strong: rgba(255, 255, 255, 0.9);
   --mnst-blue: #3f7fdb;
   --mnst-blue-600: #5c95ea;
   --mnst-blue-50: rgba(63, 127, 219, 0.28);
