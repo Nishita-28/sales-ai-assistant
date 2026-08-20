@@ -229,7 +229,14 @@ html, body, .stApp {{ font-family: "Ubuntu", -apple-system, "Segoe UI", Helvetic
    light theme (both colors were dark-ish, indistinguishable), but a real
    near-black-on-dark-background bug once the theme flipped to light text. */
 h1, h2, h3, .stMarkdown h1, .stMarkdown h2, .stMarkdown h3 {{ font-weight: 700 !important; letter-spacing: -0.01em; color: var(--mnst-ink-900) !important; }}
-p, .stMarkdown p, .stCaption, [data-testid="stCaptionContainer"] {{ color: var(--mnst-ink-500) !important; }}
+/* Split from a single shared rule: plain paragraphs are the actual
+   content this tool exists to deliver -- an AI-generated answer,
+   sitting inside a card, is the whole point of the page, not secondary
+   detail -- so it gets the brighter ink tone. True captions (source
+   labels, timestamps, "Sources" expander text) keep the dim tone,
+   since those really are secondary. */
+p, .stMarkdown p {{ color: var(--mnst-ink-700) !important; }}
+.stCaption, [data-testid="stCaptionContainer"] {{ color: var(--mnst-ink-500) !important; }}
 
 /* ---------------- Sidebar ---------------- */
 [data-testid="stSidebar"] {{ background: var(--mnst-sidebar); border-right: 1px solid var(--mnst-rail-border); }}

@@ -469,12 +469,25 @@ def _render_assistant_page_enterprise() -> None:
     tool rather than an accumulating chat log."""
     st.title("Assistant")
 
-    if not st.session_state.history:
-        st.markdown("**Try asking:**")
-        cols = st.columns(len(SAMPLE_QUESTIONS))
-        for col, q in zip(cols, SAMPLE_QUESTIONS):
-            if col.button(q, width="stretch"):
-                st.session_state.pending_question = q
+    # Rendered into an explicit st.empty() placeholder, cleared directly
+    # (try_asking_slot.empty()) the instant a sample question is clicked --
+    # relying on st.rerun() alone wasn't enough: Streamlit doesn't swap the
+    # previous run's already-sent frame for the new one until the new run
+    # finishes producing its own output, so with rerun() alone the buttons
+    # stayed on screen for the whole streaming duration anyway, same as
+    # before. Clearing the placeholder directly removes them from the DOM
+    # immediately, before the rerun (or the streaming that follows it)
+    # even starts.
+    try_asking_slot = st.empty()
+    if not st.session_state.history and "pending_question" not in st.session_state:
+        with try_asking_slot.container():
+            st.markdown("**Try asking:**")
+            cols = st.columns(len(SAMPLE_QUESTIONS))
+            for col, q in zip(cols, SAMPLE_QUESTIONS):
+                if col.button(q, width="stretch"):
+                    st.session_state.pending_question = q
+                    try_asking_slot.empty()
+                    st.rerun()
 
     # A plain text_input + separate button doesn't submit on Enter -- Enter
     # just reruns the script without registering a click. st.form does,
