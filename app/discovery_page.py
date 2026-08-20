@@ -261,6 +261,15 @@ def render_discovery_page() -> None:
         st.session_state.discovery_recommendation = _load_saved_recommendation(deal_id)
         st.session_state.discovery_qualification = _load_saved_qualification(deal_id)
 
+    # Everything below needs a real deal to attach to -- shown only once
+    # one exists, rather than rendering the use-case box and Generate
+    # button only for a rep to learn at click time that nothing can be
+    # generated without a deal. Same pattern as Sales Aid and Customer
+    # Requirements.
+    if deal_id is None:
+        st.info("Pick an existing deal, or start a new one above (Customer Name + Company), to continue.")
+        return
+
     # Auto-saves the draft to the deal on every commit (losing focus, or
     # Ctrl+Enter) -- so alt-tabbing away, switching browser tabs, or
     # clicking elsewhere never loses what's been typed. Deliberately does
@@ -295,9 +304,7 @@ def render_discovery_page() -> None:
     generate = st.button("Generate discovery questions", type="primary")
 
     if generate:
-        if deal_id is None:
-            st.error("Start a new deal above (Customer Name + Company) before generating.")
-        elif not use_case.strip():
+        if not use_case.strip():
             st.error("Describe the use case first.")
         else:
             try:
@@ -343,10 +350,9 @@ def render_discovery_page() -> None:
             except (RetrieverError, ResponseGeneratorError) as e:
                 st.error(f"Something went wrong generating questions: {e}")
             else:
-                # deal_id is guaranteed set here -- the generate block
-                # above already rejected deal_id is None before this
-                # point, and deal creation is now fully owned by
-                # render_deal_picker()'s own atomic "Start New Deal"
+                # deal_id is guaranteed set here -- the page returns early
+                # above when it's None, and deal creation is fully owned
+                # by render_deal_picker()'s own atomic "Start New Deal"
                 # form (see app/deal_picker.py).
                 update_deal_fields(deal_id, use_case=use_case)
                 set_active_deal(deal_id)

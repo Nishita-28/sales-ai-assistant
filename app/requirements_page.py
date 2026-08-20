@@ -235,6 +235,14 @@ def render_requirements_page() -> None:
     # standalone, unlinked record each time.
     deal_id, customer_name, company, _deal_use_case = render_deal_picker("requirements")
 
+    # Everything below needs a real deal to attach to -- shown only once
+    # one exists, rather than rendering the full (long) requirements form
+    # only for a rep to learn at submit time that it can't be saved
+    # without a deal. Same pattern as Sales Aid and Discovery.
+    if deal_id is None:
+        st.info("Pick an existing deal, or start a new one above (Customer Name + Company), to continue.")
+        return
+
     try:
         products, _ = load_product_index()
     except (FileNotFoundError, OSError):
@@ -545,69 +553,66 @@ def render_requirements_page() -> None:
         submitted = st.form_submit_button("Save Requirement", type="primary")
 
     if submitted:
-        if deal_id is None:
-            st.error("Pick an existing deal, or start a new one above (Customer Name + Company), first.")
-        else:
-            application = ", ".join(industries)
-            if application_details:
-                application = f"{application} -- {application_details}" if application else application_details
+        application = ", ".join(industries)
+        if application_details:
+            application = f"{application} -- {application_details}" if application else application_details
 
-            protocols = list(segment_summaries)
-            if comm_other:
-                protocols.append(comm_other)
-            certs = [c for c in certifications if c != "Other"]
-            if cert_other:
-                certs.append(cert_other)
-            env_conditions = [e for e in environmental if e != "Other"]
-            if environmental_other:
-                env_conditions.append(environmental_other)
+        protocols = list(segment_summaries)
+        if comm_other:
+            protocols.append(comm_other)
+        certs = [c for c in certifications if c != "Other"]
+        if cert_other:
+            certs.append(cert_other)
+        env_conditions = [e for e in environmental if e != "Other"]
+        if environmental_other:
+            env_conditions.append(environmental_other)
 
-            # A concrete, orderable product code, only once every real
-            # choosable segment has an answer -- deterministic, built
-            # from the registry's own segment order, never guessed at
-            # for an unresolved position.
-            suggested_code = ""
-            if selected_product is not None and choosable_segments and len(segment_selections) == len(choosable_segments):
-                suggested_code = _suggested_code(selected_product, segment_selections)
+        # A concrete, orderable product code, only once every real
+        # choosable segment has an answer -- deterministic, built
+        # from the registry's own segment order, never guessed at
+        # for an unresolved position.
+        suggested_code = ""
+        if selected_product is not None and choosable_segments and len(segment_selections) == len(choosable_segments):
+            suggested_code = _suggested_code(selected_product, segment_selections)
 
-            # deal_id is guaranteed set here -- the check above already
-            # rejected deal_id is None, and deal creation is now fully
-            # owned by render_deal_picker()'s own atomic "Start New
-            # Deal" form (see app/deal_picker.py).
-            set_active_deal(deal_id)
+        # deal_id is guaranteed set here -- the page returns early above
+        # when it's None, and deal creation is fully owned by
+        # render_deal_picker()'s own atomic "Start New Deal" form (see
+        # app/deal_picker.py).
+        set_active_deal(deal_id)
 
-            record_requirement(
-                customer_name=customer_name,
-                company=company,
-                application=application,
-                product_family=selected_product.product_name if selected_product else "",
-                install_type=install_type,
-                num_detectors=int(num_detectors),
-                comm_protocols=", ".join(protocols),
-                certifications=", ".join(certs),
-                installation_area=installation_area,
-                hazard_zone=hazard_zone,
-                temp_min=temp_min,
-                temp_max=temp_max,
-                target_gas=target_gas,
-                sensing_range=sensing_range,
-                accuracy=accuracy,
-                environmental=", ".join(env_conditions),
-                probe_length=probe_length,
-                suggested_code=suggested_code,
-                additional_requirements=additional,
-                extra_fields=json.dumps({k: v for k, v in custom_values.items() if v}, ensure_ascii=False),
-                deal_id=deal_id,
-            )
-            msg = f"Saved requirement for {customer_name} ({company})."
-            if suggested_code:
-                msg += f" Suggested product code: **{suggested_code}**."
-            st.success(msg)
-            # No st.rerun() here -- unlike Discovery, this page shows the
-            # success message (with the suggested product code) inline,
-            # which a rerun would discard before it's ever rendered. The
-            # deal picker above will show the newly created deal as soon
-            # as the rep's next interaction reruns the script anyway.
+        record_requirement(
+            customer_name=customer_name,
+            company=company,
+            application=application,
+            product_family=selected_product.product_name if selected_product else "",
+            install_type=install_type,
+            num_detectors=int(num_detectors),
+            comm_protocols=", ".join(protocols),
+            certifications=", ".join(certs),
+            installation_area=installation_area,
+            hazard_zone=hazard_zone,
+            temp_min=temp_min,
+            temp_max=temp_max,
+            target_gas=target_gas,
+            sensing_range=sensing_range,
+            accuracy=accuracy,
+            environmental=", ".join(env_conditions),
+            probe_length=probe_length,
+            suggested_code=suggested_code,
+            additional_requirements=additional,
+            extra_fields=json.dumps({k: v for k, v in custom_values.items() if v}, ensure_ascii=False),
+            deal_id=deal_id,
+        )
+        msg = f"Saved requirement for {customer_name} ({company})."
+        if suggested_code:
+            msg += f" Suggested product code: **{suggested_code}**."
+        st.success(msg)
+        # No st.rerun() here -- unlike Discovery, this page shows the
+        # success message (with the suggested product code) inline,
+        # which a rerun would discard before it's ever rendered. The
+        # deal picker above will show the newly created deal as soon
+        # as the rep's next interaction reruns the script anyway.
 
     st.divider()
     st.subheader("Recent Requirements")
