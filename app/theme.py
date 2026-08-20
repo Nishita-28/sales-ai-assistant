@@ -180,8 +180,8 @@ _CSS = """
   --mnst-ink-900: #f4f7fc;
   --mnst-ink-700: #c9d4e8;
   --mnst-ink-500: #93a3c4;
-  --mnst-border: rgba(0, 0, 0, 0.45);
-  --mnst-border-strong: rgba(0, 0, 0, 0.65);
+  --mnst-border: rgba(255, 255, 255, 0.35);
+  --mnst-border-strong: rgba(255, 255, 255, 0.6);
   --mnst-blue: #3f7fdb;
   --mnst-blue-600: #5c95ea;
   --mnst-blue-50: rgba(63, 127, 219, 0.28);
@@ -376,7 +376,7 @@ p, .stMarkdown p, .stCaption, [data-testid="stCaptionContainer"] {{ color: var(-
   color: var(--mnst-ink-700) !important;
 }}
 [data-testid^="stBaseButton"], .stButton > button, .stFormSubmitButton > button {{
-  border-radius: 8px !important; font-weight: 600 !important; border: 1px solid var(--mnst-border-strong) !important;
+  border-radius: 8px !important; font-weight: 600 !important; border: 2px solid var(--mnst-border-strong) !important;
   background: var(--mnst-surface) !important;
 }}
 [data-testid^="stBaseButton"]:hover, [data-testid^="stBaseButton"]:hover *,
@@ -411,7 +411,7 @@ p, .stMarkdown p, .stCaption, [data-testid="stCaptionContainer"] {{ color: var(-
    nearly unreadable in a screenshot taken over a bright stretch of the
    image. A fully opaque panel reads clearly regardless of what's behind it. */
 [data-testid="stTextInputRootElement"], [data-testid="stTextArea"] > div {{
-  border-radius: 10px !important; border: 1px solid var(--mnst-border-strong) !important; background: var(--mnst-surface-solid) !important;
+  border-radius: 10px !important; border: 2px solid var(--mnst-border-strong) !important; background: var(--mnst-surface-solid) !important;
 }}
 [data-testid="stTextInputRootElement"]:has(input:focus), [data-testid="stTextArea"] > div:has(textarea:focus) {{
   border-color: var(--mnst-blue) !important; box-shadow: 0 0 0 3px var(--mnst-blue-50) !important;
@@ -434,7 +434,7 @@ p, .stMarkdown p, .stCaption, [data-testid="stCaptionContainer"] {{ color: var(-
    defaults). Same solid-panel treatment as the text input above, so the
    two read as one consistent input style. */
 [data-testid="stNumberInputContainer"] {{
-  background: var(--mnst-surface-solid) !important; border: 1px solid var(--mnst-border-strong) !important; border-radius: 10px !important;
+  background: var(--mnst-surface-solid) !important; border: 2px solid var(--mnst-border-strong) !important; border-radius: 10px !important;
 }}
 [data-testid="stNumberInputContainer"]:has(input:focus) {{
   border-color: var(--mnst-blue) !important; box-shadow: 0 0 0 3px var(--mnst-blue-50) !important;
@@ -459,10 +459,10 @@ p, .stMarkdown p, .stCaption, [data-testid="stCaptionContainer"] {{ color: var(-
    equivalent wrapper sits one level above its own stMultiSelectTagsContainer.
    :has() reaches both without depending on those unstable class names. */
 [data-testid="stSelectbox"] div:has(> input) {{
-  background: var(--mnst-surface) !important; border: 1px solid var(--mnst-border-strong) !important; border-radius: 10px !important;
+  background: var(--mnst-surface) !important; border: 2px solid var(--mnst-border-strong) !important; border-radius: 10px !important;
 }}
 [data-testid="stMultiSelect"] div:has(> [data-testid="stMultiSelectTagsContainer"]) {{
-  background: var(--mnst-surface) !important; border: 1px solid var(--mnst-border-strong) !important; border-radius: 10px !important;
+  background: var(--mnst-surface) !important; border: 2px solid var(--mnst-border-strong) !important; border-radius: 10px !important;
 }}
 [data-testid="stSelectbox"] input, [data-testid="stMultiSelect"] input {{
   color: var(--mnst-ink-900) !important;
@@ -472,7 +472,7 @@ p, .stMarkdown p, .stCaption, [data-testid="stCaptionContainer"] {{ color: var(-
    itself is transparent, its immediate parent carries the real (previously
    solid white) background. */
 div:has(> [role="listbox"]) {{
-  background: var(--mnst-surface-solid) !important; border: 1px solid var(--mnst-border-strong) !important;
+  background: var(--mnst-surface-solid) !important; border: 2px solid var(--mnst-border-strong) !important;
 }}
 [role="option"] {{ color: var(--mnst-ink-900) !important; }}
 [role="option"]:hover, [role="option"][aria-selected="true"] {{ background: var(--mnst-blue-50) !important; }}
@@ -514,14 +514,14 @@ div:has(> [role="listbox"]) {{
    for a white card on a light page and is invisible against a dark
    background -- replaced with a soft light glow instead. */
 [data-testid="stVerticalBlockBorderWrapper"] {{
-  border-radius: 12px !important; border: 1px solid var(--mnst-border) !important; background: var(--mnst-surface) !important;
+  border-radius: 12px !important; border: 2px solid var(--mnst-border) !important; background: var(--mnst-surface) !important;
   backdrop-filter: blur(14px) !important; -webkit-backdrop-filter: blur(14px) !important;
   box-shadow: 0 1px 2px rgba(0,0,0,0.2), 0 8px 24px rgba(0,0,0,0.28) !important;
 }}
 
 /* ---------------- Expander (Sources) ---------------- */
 [data-testid="stExpander"] {{
-  border: 1px solid var(--mnst-border) !important; border-radius: 10px !important; background: var(--mnst-surface) !important;
+  border: 2px solid var(--mnst-border) !important; border-radius: 10px !important; background: var(--mnst-surface) !important;
   backdrop-filter: blur(14px) !important; -webkit-backdrop-filter: blur(14px) !important;
 }}
 [data-testid="stExpander"] summary {{ font-weight: 600 !important; color: var(--mnst-ink-500) !important; font-size: 13px !important; }}
