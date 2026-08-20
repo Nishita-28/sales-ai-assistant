@@ -5,6 +5,7 @@ it's ever reached without going through the sidebar gate first.
 from __future__ import annotations
 
 import shutil
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -13,7 +14,7 @@ import pandas as pd
 import streamlit as st
 
 from app import theme
-from app.background_jobs import start_job
+from app.background_jobs import get_active_jobs, start_job
 from app.claims_store import load_claims, save_claims
 from app.db import is_postgres_enabled
 from app.deals_store import MEDDPICC_FIELDS, delete_deal, get_recommendation, list_deals, missing_fields
@@ -224,7 +225,36 @@ def _render_upload_result() -> None:
         st.rerun()
 
 
+def _render_removal_in_progress_banner() -> None:
+    """A loud, impossible-to-miss banner for an in-flight document-removal
+    background job (see app.background_jobs), shown right at the top of
+    this tab -- not just the small status line in the sidebar (see
+    streamlit_app.py's sidebar fragment), which is easy to miss entirely
+    if an admin isn't looking at it. Confirmed by direct timing: this job
+    genuinely takes about a minute (full product-registry rebuild), likely
+    longer on the live deployment's more limited compute -- without a
+    loud, sustained "still working" indicator right where the admin is
+    already looking, a minute of apparent silence reads as broken, not
+    slow."""
+    for job in get_active_jobs():
+        if not job.job_id.startswith("remove-"):
+            continue
+        if job.status == "running":
+            elapsed = int(time.time() - job.started_at)
+            st.warning(
+                f"⏳ Removing **{job.label}** from the index -- rebuilding the product "
+                f"registry, this normally takes about a minute ({elapsed}s so far). "
+                "Stay on this tab or check back shortly; it'll update automatically.",
+                icon="⏳",
+            )
+        elif job.status == "error":
+            st.error(f"Failed to remove **{job.label}**: {job.error}")
+        else:
+            st.success(f"Removed **{job.label}**.")
+
+
 def _render_documents_tab() -> None:
+    _render_removal_in_progress_banner()
     _render_rebuild_status()
     _render_upload_result()
 

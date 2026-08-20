@@ -33,6 +33,7 @@ _JOBS: dict[str, "JobStatus"] = {}
 
 @dataclass
 class JobStatus:
+    job_id: str
     label: str
     status: str = "running"  # "running" | "done" | "error"
     error: str = ""
@@ -46,7 +47,7 @@ def start_job(job_id: str, label: str, fn: Callable[[], None]) -> None:
     job_id -- a fresh attempt should read as fresh, not show stale
     "done"/"error" text from an earlier run."""
     with _STATE_LOCK:
-        _JOBS[job_id] = JobStatus(label=label)
+        _JOBS[job_id] = JobStatus(job_id=job_id, label=label)
 
     def _run() -> None:
         with _LOCK:
@@ -55,11 +56,11 @@ def start_job(job_id: str, label: str, fn: Callable[[], None]) -> None:
             except Exception as e:
                 with _STATE_LOCK:
                     _JOBS[job_id] = JobStatus(
-                        label=label, status="error", error=str(e), finished_at=time.time()
+                        job_id=job_id, label=label, status="error", error=str(e), finished_at=time.time()
                     )
                 return
         with _STATE_LOCK:
-            _JOBS[job_id] = JobStatus(label=label, status="done", finished_at=time.time())
+            _JOBS[job_id] = JobStatus(job_id=job_id, label=label, status="done", finished_at=time.time())
 
     threading.Thread(target=_run, daemon=True).start()
 
