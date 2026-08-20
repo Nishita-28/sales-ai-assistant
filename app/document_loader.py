@@ -1380,10 +1380,28 @@ def extract_blocks(file_path: str | Path) -> list[dict[str, Any]]:
     return extractor(path)
 
 
+_load_document_cache: dict[Path, tuple[float, int, dict[str, Any]]] = {}
+
+
 def load_document(file_path: str | Path, verbose: bool = True) -> dict[str, Any]:
     """Loads a file into readable text plus ordered blocks, along with any
-    coverage warnings."""
+    coverage warnings. Parsing (especially OCR on embedded images) is slow
+    enough that callers can end up loading the same untouched file twice in
+    one process -- e.g. a full reindex loads every document, then a
+    registry rebuild loads the same catalogues again -- so results are
+    cached per process, keyed by path + mtime + size, and reused as long as
+    the file hasn't changed on disk."""
     path = Path(file_path)
+    try:
+        stat = path.stat()
+        cache_key = path.resolve()
+        cached = _load_document_cache.get(cache_key)
+        if cached is not None and cached[0] == stat.st_mtime and cached[1] == stat.st_size:
+            return cached[2]
+    except OSError:
+        stat = None
+        cache_key = None
+
     blocks = extract_blocks(path)
 
     readable_parts: list[str] = []
@@ -1416,13 +1434,18 @@ def load_document(file_path: str | Path, verbose: bool = True) -> dict[str, Any]
         for w in warnings:
             print(f"WARNING: {w}", file=sys.stderr)
 
-    return {
+    result = {
         "filename": path.name,
         "file_path": str(path),
         "text": "\n".join(readable_parts),
         "blocks": blocks,
         "warnings": warnings,
     }
+
+    if stat is not None and cache_key is not None:
+        _load_document_cache[cache_key] = (stat.st_mtime, stat.st_size, result)
+
+    return result
 
 
 # Backward-compatible alias for older callers.

@@ -193,9 +193,10 @@ html, body, .stApp {{ font-family: "Ubuntu", -apple-system, "Segoe UI", Helvetic
 /* !important needed: Streamlit's base stylesheet sets its own dark text
    color that otherwise wins the cascade. */
 h1, h2, h3, .stMarkdown h1, .stMarkdown h2, .stMarkdown h3 {{ font-weight: 700 !important; letter-spacing: -0.01em; color: var(--mnst-ink-900) !important; }}
-/* Paragraphs (the AI's actual answer) get the brighter ink tone since they're
-   the primary content; true captions keep the dim tone. */
-p, .stMarkdown p {{ color: var(--mnst-ink-700) !important; }}
+/* Paragraphs (the AI's actual answer) get the brightest ink tone and a
+   heavier weight since they're the primary content; true captions keep
+   the dim tone. */
+p, .stMarkdown p {{ color: var(--mnst-ink-900) !important; font-weight: 500 !important; }}
 .stCaption, [data-testid="stCaptionContainer"] {{ color: var(--mnst-ink-500) !important; }}
 
 /* ---------------- Sidebar ---------------- */
