@@ -68,12 +68,10 @@ theme.inject_theme()  # no-op when UI_THEME=classic -- see app/theme.py
 # ---------------------------------------------------------------------------
 # Cold-start sync from Neon -- Streamlit Community Cloud's filesystem is
 # ephemeral, so a fresh container's local data/approved_docs/ is either
-# empty or leftover from an unrelated previous container. When
-# DATABASE_URL is configured, Postgres is the durable source of truth:
-# pull every stored document down to local disk, then rebuild the local
-# Chroma index and product registry from them, once per server process.
-# No-op when DATABASE_URL isn't set -- local data/approved_docs/ is
-# already the source of truth in that mode, same as before this existed.
+# empty or stale. When DATABASE_URL is configured, Postgres is the durable
+# source of truth: pull every stored document to local disk, then rebuild
+# the local Chroma index and product registry, once per server process.
+# No-op when DATABASE_URL isn't set.
 # ---------------------------------------------------------------------------
 @st.cache_resource
 def _sync_from_neon_on_cold_start() -> None:
@@ -86,10 +84,8 @@ def _sync_from_neon_on_cold_start() -> None:
             build_index(chunks)
             rebuild_product_registry(APPROVED_DOCS_DIR)
     except Exception as e:
-        # Deliberately NOT swallowed like _warm_up_backend below -- an
-        # admin needs to know the assistant may be running with an
-        # empty/stale knowledge base, not have that fail silently (see
-        # the persistence plan's point 9: never silently lose data).
+        # Not swallowed like _warm_up_backend below -- an admin needs to know
+        # the assistant may be running with an empty/stale knowledge base.
         st.error(
             f"Failed to sync documents from the database on startup: {e}. "
             "The assistant may have no knowledge base until this is resolved."
@@ -171,8 +167,7 @@ def copy_button(text: str, label: str = "Copy answer", key: str = "", icon: bool
     # inside the double-quoted onclick="..." attribute.
     safe_text = html.escape(json.dumps(text))
     safe_label = html.escape(label)
-    # icon=False (the default) keeps this exactly as it was pre-redesign --
-    # only the enterprise theme's call sites opt into the icon variant.
+    # icon=False keeps the plain default; only enterprise call sites opt into the icon variant.
     label_html = f"{_COPY_ICON_SVG}{safe_label}" if icon else safe_label
     copied_html = f"{_CHECK_ICON_SVG}Copied" if icon else "Copied"
     safe_label_html = html.escape(json.dumps(label_html))
@@ -206,12 +201,9 @@ def count_approved_docs() -> int:
 
 @st.fragment(run_every="3s")
 def _render_background_job_status() -> None:
-    """A background document-removal job (see app.background_jobs and
-    admin_page._confirm_remove_dialog) has no way to push an update into
-    any browser session -- this fragment polls its shared, in-process
-    status dict on a short timer instead, independent of whatever page
-    is actually active, so "still removing" / "done" / "failed" shows up
-    here without blocking or refreshing the rest of the page."""
+    """Streamlit can't push updates from a background thread into a browser
+    session, so this fragment polls the shared in-process status dict on a
+    short timer instead, independent of whatever page is active."""
     for job in get_active_jobs():
         if job.status == "running":
             st.info(f"Removing **{job.label}**...")
@@ -223,11 +215,11 @@ def _render_background_job_status() -> None:
 
 with st.sidebar:
     if theme.is_enterprise_theme():
-        # Logo is rendered separately (see theme.py) positioned above the
-        # nav via CSS, since Streamlit's auto nav list is a DOM sibling
-        # that can't be interleaved with content from `with st.sidebar:`.
-        # Admin is a regular nav page here (see render_admin_gate below),
-        # not a sidebar expander, so nothing admin-related renders here.
+        # Logo is positioned above the nav via CSS (see theme.py), since
+        # Streamlit's auto nav list is a DOM sibling that can't be
+        # interleaved with content from `with st.sidebar:`. Admin is a
+        # regular nav page here (see render_admin_gate below), so nothing
+        # admin-related renders in this sidebar block.
         st.markdown(theme.render_logo_html(), unsafe_allow_html=True)
         st.markdown(
             f"""
@@ -272,9 +264,9 @@ with st.sidebar:
 def render_admin_gate() -> None:
     """Admin as a regular nav page (enterprise theme only): shows a
     password form in the page content itself until unlocked, instead of a
-    sidebar expander. Classic theme keeps the original sidebar-expander
-    flow untouched, so Admin only appears in the nav list at all once
-    st.session_state.admin_authenticated is already True (see pages list)."""
+    sidebar expander. Under classic theme, Admin only appears in the nav
+    list once st.session_state.admin_authenticated is already True (see
+    pages list below)."""
     if st.session_state.admin_authenticated:
         render_admin_page()
         return
@@ -319,16 +311,11 @@ def render_assistant_page() -> None:
 def _ask_and_record(question: str) -> None:
     """Runs one question through the pipeline and appends it to history.
     Shared by both the classic and enterprise layouts. Streams the answer
-    live as it's generated (like ChatGPT) instead of showing a spinner
-    until the full response is ready -- echoes the question first, in
-    each theme's own style, so the live text doesn't appear with no
-    visible prompt above it. Sources/badges/feedback buttons render
-    normally once the completed turn is appended to history and the
-    script reruns. Customer-facing wording is NOT generated here -- it's
-    produced on demand (see _render_customer_wording()) only if a rep
-    actually asks for it, since generating it eagerly on every question
-    roughly doubled how long this step took, for a section most questions
-    never need."""
+    live as it's generated, echoing the question first so the live text
+    doesn't appear with no visible prompt above it. Customer-facing wording
+    is generated on demand (see _render_customer_wording()), not eagerly
+    here, since most questions never need it and it roughly doubles
+    generation time."""
     try:
         with st.spinner("Checking approved documents..."):
             retrieval, text_stream = stream_answer_question(question)
@@ -409,7 +396,6 @@ def _render_assistant_page_classic() -> None:
     st.title("Internal AI Sales Assistant")
     st.caption("Answers only from approved company documents. Always shows sources and confidence.")
 
-    # Example question chips for first-time users
     if not st.session_state.history:
         st.markdown("**Try asking:**")
         cols = st.columns(len(SAMPLE_QUESTIONS))
@@ -417,7 +403,6 @@ def _render_assistant_page_classic() -> None:
             if col.button(q, width="stretch"):
                 st.session_state.pending_question = q
 
-    # Render past Q&A as a chat thread
     for idx, turn in enumerate(st.session_state.history):
         with st.chat_message("user"):
             st.write(turn["question"])
@@ -452,7 +437,6 @@ def _render_assistant_page_classic() -> None:
                 record_feedback(turn["question"], turn["answer"], "unsafe")
                 st.toast("Thanks for flagging this — reported for review.")
 
-    # Question input
     question = st.chat_input("Ask a sales or application question")
     if "pending_question" in st.session_state:
         question = st.session_state.pop("pending_question")
@@ -469,31 +453,28 @@ def _render_assistant_page_enterprise() -> None:
     tool rather than an accumulating chat log."""
     st.title("Assistant")
 
-    # Rendered into an explicit st.empty() placeholder, cleared directly
-    # (try_asking_slot.empty()) the instant a sample question is clicked --
-    # this pushes an incremental update to the browser immediately, within
-    # this same script run, same mechanism st.spinner/st.write_stream use
-    # for live updates -- no st.rerun() needed. An earlier version of this
-    # fix called st.rerun() here, which "worked" but forced a whole extra
-    # full-script execution (theme injection, sidebar, etc. all over
-    # again) before the actual question even started processing --
-    # measurably slower, especially on the live deployment's more limited
-    # compute. Clearing the placeholder directly and just letting this
-    # same run fall through into _ask_and_record() below is both correct
-    # and faster.
+    # Rendered into an explicit st.empty() placeholder, cleared right after
+    # the `with` block below finishes -- pushes an incremental update to the
+    # browser within this same script run (no st.rerun() needed), so the row
+    # disappears before falling through into _ask_and_record() below.
+    # Clearing the placeholder must happen AFTER the `with` block exits, not
+    # from inside it -- calling .empty() on a placeholder while still
+    # writing into that same placeholder corrupts Streamlit's frontend
+    # render tree and crashes the page blank.
     try_asking_slot = st.empty()
+    clicked_sample_question = None
     if not st.session_state.history and "pending_question" not in st.session_state:
         with try_asking_slot.container():
             st.markdown("**Try asking:**")
             cols = st.columns(len(SAMPLE_QUESTIONS))
             for col, q in zip(cols, SAMPLE_QUESTIONS):
                 if col.button(q, width="stretch"):
-                    st.session_state.pending_question = q
-                    try_asking_slot.empty()
+                    clicked_sample_question = q
+    if clicked_sample_question:
+        st.session_state.pending_question = clicked_sample_question
+        try_asking_slot.empty()
 
-    # A plain text_input + separate button doesn't submit on Enter -- Enter
-    # just reruns the script without registering a click. st.form does,
-    # since Enter inside a form submits it the same as its submit button.
+    # st.form so Enter submits the same as clicking the button.
     with st.form("assistant_ask_form", clear_on_submit=True):
         search_col, ask_col = st.columns([6, 1])
         question = search_col.text_input(
@@ -545,11 +526,9 @@ def _render_assistant_page_enterprise() -> None:
 # Navigation.
 # Enterprise theme: Admin is always a nav item; render_admin_gate shows a
 #   password form in-page until unlocked (see above). Icons use Streamlit's
-#   built-in Material Symbols (outline style) instead of emoji, to read as
-#   a professional tool rather than a chat app -- classic theme keeps the
-#   original emoji untouched.
-# Classic theme: unchanged -- Admin only appears in the nav list at all
-#   once the sidebar password gate (above) has already passed.
+#   built-in Material Symbols instead of emoji.
+# Classic theme: Admin only appears in the nav list once the sidebar
+#   password gate (above) has already passed.
 # ---------------------------------------------------------------------------
 if theme.is_enterprise_theme():
     icon_assistant, icon_requirements, icon_discovery, icon_sales_aids, icon_admin = (
