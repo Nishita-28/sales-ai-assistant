@@ -471,13 +471,16 @@ def _render_assistant_page_enterprise() -> None:
 
     # Rendered into an explicit st.empty() placeholder, cleared directly
     # (try_asking_slot.empty()) the instant a sample question is clicked --
-    # relying on st.rerun() alone wasn't enough: Streamlit doesn't swap the
-    # previous run's already-sent frame for the new one until the new run
-    # finishes producing its own output, so with rerun() alone the buttons
-    # stayed on screen for the whole streaming duration anyway, same as
-    # before. Clearing the placeholder directly removes them from the DOM
-    # immediately, before the rerun (or the streaming that follows it)
-    # even starts.
+    # this pushes an incremental update to the browser immediately, within
+    # this same script run, same mechanism st.spinner/st.write_stream use
+    # for live updates -- no st.rerun() needed. An earlier version of this
+    # fix called st.rerun() here, which "worked" but forced a whole extra
+    # full-script execution (theme injection, sidebar, etc. all over
+    # again) before the actual question even started processing --
+    # measurably slower, especially on the live deployment's more limited
+    # compute. Clearing the placeholder directly and just letting this
+    # same run fall through into _ask_and_record() below is both correct
+    # and faster.
     try_asking_slot = st.empty()
     if not st.session_state.history and "pending_question" not in st.session_state:
         with try_asking_slot.container():
@@ -487,7 +490,6 @@ def _render_assistant_page_enterprise() -> None:
                 if col.button(q, width="stretch"):
                     st.session_state.pending_question = q
                     try_asking_slot.empty()
-                    st.rerun()
 
     # A plain text_input + separate button doesn't submit on Enter -- Enter
     # just reruns the script without registering a click. st.form does,
