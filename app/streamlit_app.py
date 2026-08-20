@@ -73,7 +73,7 @@ theme.inject_theme()  # no-op when UI_THEME=classic -- see app/theme.py
 # the local Chroma index and product registry, once per server process.
 # No-op when DATABASE_URL isn't set.
 # ---------------------------------------------------------------------------
-@st.cache_resource
+@st.cache_resource(show_spinner="Loading knowledge base...")
 def _sync_from_neon_on_cold_start() -> None:
     if not is_postgres_enabled():
         return
@@ -100,7 +100,7 @@ _sync_from_neon_on_cold_start()
 # and cached files once per server process, so the first real question
 # doesn't pay for setup that could happen at startup instead.
 # ---------------------------------------------------------------------------
-@st.cache_resource
+@st.cache_resource(show_spinner="Starting up...")
 def _warm_up_backend() -> None:
     try:
         warm_up_retriever()
