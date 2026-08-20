@@ -25,6 +25,7 @@ from typing import Any, Iterator, Optional
 
 import psycopg
 from psycopg.rows import dict_row
+from psycopg_pool import ConnectionPool
 
 
 class DatabaseUnavailableError(RuntimeError):
@@ -56,32 +57,56 @@ def is_postgres_enabled() -> bool:
     return bool(get_database_url())
 
 
+_pool: Optional[ConnectionPool] = None
+
+
+def _get_pool() -> ConnectionPool:
+    """A small process-level pool of warm connections, opened lazily on
+    first use. A fresh psycopg.connect() per query pays a full TCP/TLS
+    handshake to Neon every time (measured at ~0.5s each, even against
+    Neon's own pooled endpoint) -- with several queries per page render,
+    that overhead dominates page-load time. Reusing pooled connections
+    across calls avoids paying it more than once per connection's
+    lifetime."""
+    global _pool
+    if _pool is None:
+        url = get_database_url()
+        if not url:
+            raise DatabaseUnavailableError("DATABASE_URL is not configured.")
+        try:
+            _pool = ConnectionPool(
+                url,
+                min_size=1,
+                max_size=5,
+                kwargs={"row_factory": dict_row},
+                open=True,
+            )
+        except Exception as e:
+            raise DatabaseUnavailableError(f"Could not connect to the Postgres database: {e}") from e
+    return _pool
+
+
 @contextmanager
 def get_connection() -> Iterator[psycopg.Connection]:
-    """One connection per call, committed on clean exit, rolled back and
-    re-raised as DatabaseUnavailableError on failure. Short-lived by
-    design (opened, used, closed within one store call) rather than a
-    pooled/cached connection at the module level -- Neon's pooled
-    endpoint is already doing the real pooling on its side; holding a
-    long-lived connection in the Streamlit process would fight that,
-    not help it."""
-    url = get_database_url()
-    if not url:
-        raise DatabaseUnavailableError("DATABASE_URL is not configured.")
+    """Borrows a connection from the pool, committed on clean exit, rolled
+    back and re-raised as DatabaseUnavailableError on failure. The
+    connection returns to the pool afterward rather than closing, so the
+    next call can reuse it."""
+    pool = _get_pool()
     try:
-        conn = psycopg.connect(url, row_factory=dict_row, connect_timeout=10)
+        with pool.connection() as conn:
+            try:
+                yield conn
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                if isinstance(e, DatabaseUnavailableError):
+                    raise
+                raise DatabaseUnavailableError(f"Database operation failed: {e}") from e
+    except DatabaseUnavailableError:
+        raise
     except Exception as e:
         raise DatabaseUnavailableError(f"Could not connect to the Postgres database: {e}") from e
-    try:
-        yield conn
-        conn.commit()
-    except Exception as e:
-        conn.rollback()
-        if isinstance(e, DatabaseUnavailableError):
-            raise
-        raise DatabaseUnavailableError(f"Database operation failed: {e}") from e
-    finally:
-        conn.close()
 
 
 def execute(sql: str, params: tuple = ()) -> None:
