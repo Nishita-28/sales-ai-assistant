@@ -418,10 +418,8 @@ def _render_assistant_page_classic() -> None:
             st.write(turn["answer"])
 
             with st.expander("Sources"):
-                for name, section, text in turn["sources"]:
-                    st.markdown(f"- `{name}` — {section}")
-                    if text:
-                        st.markdown(f"> {text}")
+                for name in dict.fromkeys(name for name, _, _ in turn["sources"]):
+                    st.markdown(f"- `{name}`")
 
             copy_button(turn["answer"], "Copy answer", key=f"ans-{idx}")
 
@@ -502,10 +500,8 @@ def _render_assistant_page_enterprise() -> None:
         with st.container(border=True):
             st.write(turn["answer"])
             with st.expander("Sources"):
-                for name, section, text in turn["sources"]:
-                    st.markdown(f"- `{name}` — {section}")
-                    if text:
-                        st.markdown(f"> {text}")
+                for name in dict.fromkeys(name for name, _, _ in turn["sources"]):
+                    st.markdown(f"- `{name}`")
 
         acol1, acol2, acol3, acol4 = st.columns(4)
         if acol1.button("Correct", key=f"ent-ok-{idx}", icon=":material/thumb_up:"):

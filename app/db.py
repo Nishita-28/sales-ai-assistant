@@ -101,15 +101,19 @@ def _get_pool() -> ConnectionPool:
 
 # How many times to retry actually borrowing/using a connection before
 # giving up -- separate from the pool's own internal connect_timeout,
-# this covers the case where Neon's compute is mid-wake-up and needs a
-# second attempt a moment later rather than one long wait. Kept small:
-# each attempt can itself take up to the pool's own timeout (15s), so
-# 2 attempts already means a genuinely broken connection takes up to
-# ~33s to fail rather than hanging indefinitely -- long enough to ride
-# out a real wake-up, short enough not to leave a user staring at a
-# blank page for over a minute.
-_CONNECT_RETRY_ATTEMPTS = 2
-_CONNECT_RETRY_DELAY_SECONDS = 3
+# this covers the case where Neon's compute is mid-wake-up and needs
+# another attempt a moment later rather than one attempt at a fixed
+# timeout. Bounded rather than infinite: this same function backs the
+# once-per-process cold-start sync (see streamlit_app.py), which every
+# visitor waits on together -- an unbounded retry there would hang the
+# whole app for everyone, not just the one caller who hit the bad
+# connection, and if the real cause isn't transient (wrong credentials,
+# a deleted/suspended project), no amount of retrying fixes it anyway.
+# 5 attempts at up to the pool's own 15s timeout, 5s apart, bounds the
+# worst case around 90s -- comfortably past Neon's typical wake-up time
+# without leaving the app hung indefinitely on a genuinely dead database.
+_CONNECT_RETRY_ATTEMPTS = 5
+_CONNECT_RETRY_DELAY_SECONDS = 5
 
 
 @contextmanager
