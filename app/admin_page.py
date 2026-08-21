@@ -83,13 +83,11 @@ def _approved_doc_paths() -> list[Path]:
 
 @st.cache_data(show_spinner=False)
 def _read_doc_bytes(path_str: str, mtime: float) -> bytes:
-    """Cached by (path, mtime) -- same keying idea as document_loader.
-    load_document's own cache. Documents tab re-renders on every admin-page
-    interaction (st.tabs() re-runs every tab's body, not just the active
-    one), so without this every click anywhere in Admin would re-read every
-    approved document's full bytes off disk just to keep the Download
-    button's data= argument populated. mtime in the key means a replaced
-    file is picked up automatically, no manual cache-clearing needed."""
+    """Cached by (path, mtime), same keying idea as document_loader.
+    load_document's cache. Needed because st.tabs() re-runs every tab's
+    body on every admin-page interaction, not just the active one --
+    without this, every click anywhere in Admin would re-read every
+    document's bytes off disk to keep the Download button populated."""
     return Path(path_str).read_bytes()
 
 
@@ -150,14 +148,11 @@ def _confirm_remove_dialog(doc_path: Path) -> None:
     )
     col1, col2 = st.columns(2)
     if col1.button("Remove", type="primary", width="stretch"):
-        # Deliberately does nothing else here -- st.dialog has a known
-        # issue (streamlit/streamlit#9405) where it doesn't reliably close
-        # if any work happens before st.rerun(), even fast work, leaving
-        # the dialog visibly stuck open. Setting a flag and rerunning
-        # immediately is the workaround: the actual removal happens
-        # outside the dialog, at the top of _render_documents_tab, on the
-        # next run -- by which point this function isn't called again, so
-        # the dialog closes cleanly.
+        # Deliberately does nothing else here -- st.dialog (streamlit/
+        # streamlit#9405) doesn't reliably close if any work happens
+        # before st.rerun(). Set a flag and rerun immediately; the actual
+        # removal runs outside the dialog, at the top of
+        # _render_documents_tab, on the next run.
         st.session_state.pending_doc_removal = str(doc_path)
         st.rerun()
     if col2.button("Cancel", width="stretch"):
@@ -178,16 +173,11 @@ def _process_pending_doc_removal() -> None:
     if not doc_path.exists():
         return
 
-    # Only the file move stays synchronous -- it's local disk, effectively
-    # instant, and it's what makes the document disappear from "Current
-    # documents" immediately. Everything else that touches the database or
-    # the vector index (type removal, stored bytes, index removal, registry
-    # rebuild) moves to the background job too, even though type/bytes
-    # removal alone would usually be fast -- st.dialog's known close-delay
-    # bug (see _confirm_remove_dialog's comment) means ANY work still done
-    # synchronously here directly adds to how long the dialog stays open,
-    # so keeping this path to just the move keeps that close as fast as
-    # possible.
+    # Only the file move stays synchronous -- local disk, effectively
+    # instant, and what makes the document disappear immediately.
+    # Everything else moves to the background job too, since the
+    # st.dialog close-delay bug means any synchronous work here directly
+    # adds to how long the dialog stays open.
     REMOVED_DOCS_DIR.mkdir(parents=True, exist_ok=True)
     doc_name = doc_path.name
     shutil.move(str(doc_path), str(REMOVED_DOCS_DIR / doc_name))
@@ -213,12 +203,9 @@ _TYPE_HELP = {
 }
 
 # Which page(s) each type feeds, read off the real routing logic (app/
-# document_types.py's MAIN_ASSISTANT_EXCLUDED_TYPES, is_product_catalogue,
-# and discovery_generator.py's methodology/recommendable scoping) so this
-# can't drift out of sync with what the code does. Shown once in a
-# reference expander rather than repeated under every document row --
-# multiplying per-row elements can trigger a Streamlit tab-rendering bug
-# on this page (see _render_product_field_row's comment).
+# document_types.py, discovery_generator.py's scoping) so this can't drift
+# out of sync. Shown once in a reference expander rather than repeated per
+# document row -- see _render_product_field_row's comment.
 _TYPE_USED_BY = {
     "Product Catalogue": "Assistant, Discovery Questions, Sales Aids, Customer Requirements",
     "Use Case Guide": "Assistant, Discovery Questions, Sales Aids",
@@ -256,12 +243,10 @@ def _render_upload_result() -> None:
 
 
 def _render_removal_in_progress_banner() -> None:
-    """A loud, hard-to-miss banner for an in-flight document-removal
-    background job (see app.background_jobs), shown at the top of this tab
-    -- not just the small status line in the sidebar (see streamlit_app.py's
-    sidebar fragment), which is easy to miss. This job genuinely takes about
-    a minute (full product-registry rebuild), so a sustained "still
-    working" indicator keeps that from reading as broken."""
+    """A loud banner for an in-flight document-removal background job,
+    shown at the top of this tab -- the small sidebar status line alone is
+    easy to miss. The job genuinely takes about a minute (full registry
+    rebuild), so a sustained indicator keeps it from reading as broken."""
     for job in get_active_jobs():
         if not job.job_id.startswith("remove-"):
             continue
@@ -487,25 +472,18 @@ def _render_documents_tab() -> None:
             st.caption(f"Used by: {_TYPE_USED_BY[doc_type]}")
 
 
-# ---------------------------------------------------------------------------
-# Approved Claims tab -- indexed alongside the real approved documents (see
-# retriever.load_and_chunk_approved_docs), so this content is retrievable
-# and can inform an answer. It's still not the same as Restricted Claims:
-# it's admin-typed text, not independently verified against the approved
-# documents, so it can't on its own satisfy a restricted-category claim
-# (pricing, certifications, safety, delivery) -- see
-# claim_checker.guardrail_source_text.
-# ---------------------------------------------------------------------------
+# Approved Claims tab -- indexed alongside the real approved documents, so
+# this content is retrievable and can inform an answer. Not the same as
+# Restricted Claims: it's admin-typed, not independently verified, so it
+# can't on its own satisfy a restricted-category claim (see
+# claim_checker.guardrail_source_text).
 def _render_approved_claims_tab() -> None:
     header, bullets = load_claims(APPROVED_CLAIMS_PATH)
 
-    # A st.data_editor with a fixed key keeps its own {edited_rows,
-    # added_rows, deleted_rows} diff in session_state, keyed by row
-    # position, and that diff survives across reruns. After Save writes
-    # the shorter file, the stale diff would otherwise still refer to old
-    # row positions and get silently re-applied on top of the fresh data --
-    # making a deleted row appear to "come back". Bumping the key on every
-    # save forces a brand-new widget with no carried-over diff.
+    # st.data_editor keeps its row-diff in session_state keyed by the
+    # widget key; after Save writes the shorter file, a stale diff would
+    # re-apply on top of it and make a deleted row "come back". Bumping
+    # the key on every save forces a fresh widget with no carried-over diff.
     if "approved_claims_editor_version" not in st.session_state:
         st.session_state.approved_claims_editor_version = 0
 
@@ -666,13 +644,10 @@ def _render_accuracy_section() -> None:
     """AI Performance: an accuracy trend built from the same Correct/Wrong/
     Unsafe events the Assistant page's feedback buttons record.
 
-    IMPORTANT CAVEAT (this is why the metric is labeled "Feedback Accuracy",
-    not "AI Accuracy"): this only reflects the answers a rep bothered to
-    rate, not a random sample of every answer given. If feedback is sparse,
-    or reps only click a button when something's wrong (a common real-world
-    bias -- correct answers rarely get acknowledged), this number will skew
-    pessimistic and should not be read as the model's true accuracy.
-    """
+    Labeled "Feedback Accuracy", not "AI Accuracy", because it only
+    reflects the answers a rep bothered to rate, not a random sample --
+    sparse feedback, or reps only flagging wrong answers, skews this
+    pessimistic. Not the model's true accuracy."""
     rows = daily_feedback_counts()
     if not rows:
         st.info(
@@ -754,11 +729,8 @@ def _confirm_clear_feedback_dialog(cutoff_date: Optional[str]) -> None:
         )
     col1, col2 = st.columns(2)
     if col1.button("Delete", type="primary", width="stretch", disabled=count == 0):
-        # Deliberately does nothing else here -- same st.dialog workaround
-        # as _confirm_remove_dialog (see its comment): st.dialog doesn't
-        # reliably close if any work happens before st.rerun(). The actual
-        # clear happens outside the dialog, at the top of
-        # _render_feedback_tab, on the next run.
+        # Same st.dialog close-delay workaround as _confirm_remove_dialog --
+        # the actual clear happens outside the dialog, on the next run.
         st.session_state.pending_feedback_clear = {"cutoff_date": cutoff_date}
         st.rerun()
     if col2.button("Cancel", width="stretch"):
@@ -1070,15 +1042,10 @@ def _admin_selectable_segments(nomenclature) -> list[tuple[str, str, dict[str, s
 def _effective_product_fields(product) -> list[tuple[str, dict[str, str], bool, str]]:
     """(label, options, is_ordering_code, field_type) for every selectable
     field this product currently shows on the real Customer Requirements
-    form -- both real ordering-code segments (2+ documented values,
-    e.g. Output Signal) and catalogue/admin "additional" ones (e.g.
-    Range on a product where Range isn't part of the order code),
-    minus anything hidden or edited-away here. is_ordering_code is True
-    only for a real, un-edited ordering-code segment -- shown so the
-    admin knows editing it removes that position from the suggested
-    product code (see product_field_overrides.
-    is_nomenclature_label_hidden_or_edited); field_type is always
-    "select" for one of those, since it's still a real ordering code."""
+    form -- both real ordering-code segments and catalogue/admin
+    "additional" ones, minus anything hidden or edited-away. is_ordering_code
+    is True only for a real, un-edited segment, so the admin knows editing
+    it removes that position from the suggested product code."""
     hidden = product_field_overrides.get_hidden(product.product_name)
     fields_override = product_field_overrides.get_fields(product.product_name)
     result: list[tuple[str, dict[str, str], bool, str]] = []
@@ -1117,12 +1084,10 @@ def _confirm_delete_generic_field_dialog(key: str, label: str) -> None:
 def _render_product_field_row(
     product_name: str, label: str, options: dict[str, str], is_ordering_code: bool, field_type: str = "select"
 ) -> None:
-    # Deliberately no st.container(border=True) wrapper, and label +
-    # options collapsed into one markdown call rather than separate
-    # markdown/caption/caption calls -- a high total element count on this
-    # page can leave stale DOM behind when switching tabs (a Streamlit/
-    # React reconciliation issue tied to the size of what changes in one
-    # rerun), so fewer elements per row keeps that risk down.
+    # No st.container(border=True) wrapper, and label+options collapsed
+    # into one markdown call -- a high element count on this page can
+    # leave stale DOM behind when switching tabs, so fewer elements per
+    # row keeps that risk down.
     edit_key = f"editing-product-{product_name}-{label}"
     editing = st.session_state.get(edit_key, False)
     if not editing:
@@ -1179,13 +1144,10 @@ def _render_generic_field_row(field: dict) -> None:
         if col2.button("Edit", key=f"edit-btn-generic-{key}", width="stretch"):
             st.session_state[edit_key] = True
             st.rerun()
-        # A core field's widget is hardcoded in requirements_page.py
-        # (not generated from this list), so deleting the row
-        # wouldn't remove it from the form, only reset its label
-        # back to default and silently re-show it -- hiding
-        # (visible=False, row kept) is the only real removal for one
-        # of these. A custom field has no such widget to fall back
-        # to, so it's deleted outright.
+        # A core field's widget is hardcoded in requirements_page.py, so
+        # deleting the row wouldn't remove it from the form -- hiding
+        # (visible=False, row kept) is the only real removal for one of
+        # these. A custom field has no such widget, so it's deleted outright.
         delete_label = "Hide" if field.get("core") else "Delete"
         if col3.button(delete_label, key=f"del-btn-generic-{key}", width="stretch"):
             if field.get("core"):

@@ -1,15 +1,11 @@
-"""Regression test for a real, confirmed failure: a newly-added Approved
-Claims bullet didn't surface in the assistant's answer even after
-re-indexing. Root cause was chunk_documents' general word-count packing
-(see chunker.DEFAULT_CHUNK_SIZE's own comment: "how many short facts
-share a chunk") -- fine for a document's prose, wrong for Approved
-Claims, where each bullet is an independent, unrelated fact. A short
-bullet appended after several AURIGA-related ones got packed into the
-same ~50-word chunk, whose embedding then read as "about AURIGA" and
-buried the unrelated bullet entirely (never surfaced even fully
-unscoped). Confirmed live: moving the bullet's own chunk similarity from
-0.38 (not in the top 15 matches) to 0.759 (top match) by giving each
-bullet its own chunk via chunk_approved_claims.
+"""Regression test: a newly-added Approved Claims bullet must surface in
+the assistant's answer after re-indexing. chunk_documents' general
+word-count packing is fine for a document's prose, but wrong for Approved
+Claims, where each bullet is an independent, unrelated fact -- a short
+bullet packed into the same chunk as several AURIGA-related ones would
+get its embedding dominated by "about AURIGA" and never surface on its
+own. chunk_approved_claims avoids this by giving each bullet its own
+chunk.
 """
 from app.chunker import chunk_approved_claims
 

@@ -1,18 +1,14 @@
 """Durable storage for approved-document *bytes* in Postgres (Neon) --
 the piece that makes an admin-uploaded document survive a Streamlit
-Community Cloud redeploy or cold start, since the ephemeral local
-filesystem (data/approved_docs/) does not.
+Cloud redeploy or cold start, since the ephemeral local filesystem
+(data/approved_docs/) does not.
 
-Only meaningful when app.db.is_postgres_enabled() -- there's no local-
-file equivalent to fall back to here, because the local file already IS
-the storage in that mode (admin_page.py writes it directly, same as
-always). When Postgres is enabled, every write here happens *alongside*
-the local file write, not instead of it: the local copy is still what
-the document pipeline (python-docx, pypdf, openpyxl, ...) actually reads
-from, since none of that code operates on in-memory bytes. Postgres is
-the durable backup copy the app rebuilds local disk *from* on cold
-start -- see sync_local_docs_from_postgres, called once at app boot
-(see app.streamlit_app).
+Only meaningful when app.db.is_postgres_enabled(). Every write here
+happens *alongside* the local file write, not instead of it -- the local
+copy is still what the document pipeline actually reads from, since none
+of it operates on in-memory bytes. Postgres is the durable backup the app
+rebuilds local disk *from* on cold start (sync_local_docs_from_postgres,
+called once at app boot).
 """
 from __future__ import annotations
 
@@ -59,16 +55,12 @@ def list_stored_documents() -> list[str]:
 
 def sync_local_docs_from_postgres(docs_dir: str | Path = "data/approved_docs") -> int:
     """Pulls every stored document down into docs_dir, overwriting
-    whatever's there -- Postgres is the durable source of truth, so this
-    makes local disk match it exactly. Called once at app boot (a cold
-    start's local data/approved_docs/ is either empty or leftover from a
-    previous, unrelated container). Returns how many files were written.
+    whatever's there -- Postgres is the durable source of truth. Called
+    once at app boot. Returns how many files were written.
 
-    Deliberately does NOT delete a local file that has no matching
-    Postgres row -- the only way that happens is a document added
-    through some path that bypassed save_document_bytes, and silently
-    deleting local content on a mismatch is a worse failure mode than
-    leaving an extra file around."""
+    Deliberately does NOT delete a local file with no matching Postgres
+    row -- silently deleting local content on a mismatch is a worse
+    failure mode than leaving an extra file around."""
     docs_dir = Path(docs_dir)
     docs_dir.mkdir(parents=True, exist_ok=True)
     db.ensure_schema()

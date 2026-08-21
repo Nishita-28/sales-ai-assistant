@@ -1,13 +1,7 @@
-"""Product Index -- the data model for Path 2 (deterministic product
-identity), and a loader for it. This is Point 1 of the architecture only:
-what a Product Index entry is, and how to read one from disk.
-
-Deliberately NOT included here (separate, later work):
-- Extraction -- populating data/product_registry.json from the catalogues
-  (see the registry-builder script; this module only reads its output).
-- The dispatcher -- deciding which questions should consult this index.
-- Wiring into retriever.py/response_generator.py -- the live app doesn't
-  use this yet; it's a standalone data model and loader until that's done.
+"""Product Index -- the data model for deterministic product identity,
+and a loader for it. Extraction (populating data/product_registry.json)
+lives in registry_builder.py; routing questions to this index lives in
+dispatcher.py. This module only defines the data model and reads it.
 
 Descriptive/explanatory product content (how something works, why it's
 suitable) stays in the catalogues themselves, answered by semantic RAG --
@@ -29,43 +23,36 @@ REGISTRY_PATH = Path("data/product_registry.json")
 @dataclass(frozen=True)
 class NomenclatureSegment:
     """One selectable position in a product's ordering code -- a label
-    (e.g. "Output Signal", "Range Full Scale") plus its decoded values.
-    Values are plain strings for enum-like segments (a communication
-    protocol choice is not a concentration) or ConcentrationRange for
-    genuinely concentration-valued segments (Range / Range Full Scale) --
-    see app.concentration.CONCENTRATION_RANGE_LABELS, applied at
-    extraction time, not here."""
+    plus its decoded values. Values are plain strings for enum-like
+    segments, or ConcentrationRange for concentration-valued ones (see
+    app.concentration.CONCENTRATION_RANGE_LABELS, applied at extraction
+    time, not here)."""
 
     label: str
     values: dict[str, Union[str, ConcentrationRange]]
 
 
-# A nomenclature segment can be a fixed label (e.g. "FIXaHY" -> "Product
-# Series Name", nothing to select) or a NomenclatureSegment (selectable,
-# with decoded values). The whole nomenclature can also be the literal
-# string "Unknown" -- the pattern wasn't found for that catalogue (e.g.
-# FIXaHY-4220MA's different table structure, or the Analyzer's prose-based
-# labels) -- never guessed at.
+# A nomenclature segment can be a fixed label (nothing to select) or a
+# NomenclatureSegment (selectable, with decoded values). The whole
+# nomenclature can also be the literal string "Unknown" if the expected
+# pattern wasn't found for that catalogue -- never guessed at.
 NomenclatureValue = Union[str, NomenclatureSegment]
 Nomenclature = Union[dict[str, NomenclatureValue], str]
 
 
 @dataclass(frozen=True)
 class ProductIndexEntry:
-    """One product's structured identity -- everything Path 2 needs to
-    answer "what is this" and "which catalogue documents it" without
+    """One product's structured identity -- everything the dispatcher needs
+    to answer "what is this" and "which catalogue documents it" without
     retrieval. Fields that couldn't be confidently extracted are the
-    literal string "Unknown", never a guess (see the registry-builder
-    script's vocabulary-matching rules).
+    literal string "Unknown", never a guess.
 
     additional_selectable_parameters holds real, documented selectable
-    specs (e.g. VISION H2 LD's Range, Background Gas, Compatible
-    Interfaces, Connector Option) that have NO position in the product's
-    own ordering-code suffix at all -- {label: {option name: description}}
-    -- kept separate from `nomenclature` (which only ever represents
-    literal positions in the order code) rather than folding them in,
-    since a caller reconstructing a real order code from `nomenclature`
-    must never accidentally include one of these in it."""
+    specs with NO position in the product's own ordering-code suffix --
+    {label: {option name: description}} -- kept separate from
+    `nomenclature` (which only represents literal order-code positions)
+    so a caller reconstructing a real order code from `nomenclature`
+    can't accidentally include one of these."""
 
     product_name: str
     family: str
@@ -109,11 +96,9 @@ def _parse_nomenclature(raw: Union[dict, str]) -> Nomenclature:
 def load_product_index(path: Path = REGISTRY_PATH) -> tuple[list[ProductIndexEntry], dict[str, str]]:
     """Loads data/product_registry.json into typed entries. Returns
     (products, technology_aliases) -- the latter a small, human-supplied
-    map like {"SSEC": "Solid State Electrochemical"}, since that
-    abbreviation never appears in any catalogue and can't be extracted
-    (see app.concentration's module docstring for why). Raises if the
-    file is missing or malformed; callers decide how to handle that --
-    this doesn't guess at a fallback."""
+    map like {"SSEC": "Solid State Electrochemical"} for abbreviations
+    that never appear in any catalogue and can't be extracted. Raises if
+    the file is missing or malformed; callers decide how to handle that."""
     data = json.loads(path.read_text(encoding="utf-8"))
     products = [
         ProductIndexEntry(
@@ -137,9 +122,8 @@ def load_product_index(path: Path = REGISTRY_PATH) -> tuple[list[ProductIndexEnt
 
 def by_name(products: list[ProductIndexEntry], name: str) -> Optional[ProductIndexEntry]:
     """Exact, case-insensitive match against a product's canonical name or
-    any of its aliases. A basic index lookup, not a query-routing decision
-    -- deciding *when* to call this belongs to the dispatcher, separate,
-    later work."""
+    any of its aliases. A basic index lookup -- query-routing decisions
+    belong to the dispatcher, not here."""
     name_lower = name.strip().lower()
     for p in products:
         if p.product_name.lower() == name_lower or name_lower in {a.lower() for a in p.aliases}:

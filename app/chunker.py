@@ -61,14 +61,11 @@ _GENERIC_FILENAME_WORDS = {
 
 
 def _distinctive_filename_tokens(filename: str) -> set[str]:
-    """MNST's catalogue filenames follow a real, consistent convention:
-    "Catalogue_<exact model name> (<generic category descriptor>)" -- e.g.
-    "Catalogue_FIXaHY H2 LD (Leak Detector Series)". The parenthesized
-    part is always the generic descriptor, never the model, so stripping
-    it (rather than maintaining a hand-typed stopword list) gives a
-    precise signal for what actually distinguishes this document. Falls
-    back to a small stopword list for the one filename that doesn't
-    follow this convention (no "Catalogue_" marker, no parentheses)."""
+    """MNST catalogue filenames follow "Catalogue_<model name>
+    (<generic descriptor>)" -- the parenthesized part is always generic,
+    never the model, so stripping it gives a precise distinguishing
+    signal. Falls back to a stopword list for the one filename that
+    doesn't follow this convention."""
     name = os.path.splitext(filename)[0]
     marker = re.search(r"catalogu?e_", name, re.IGNORECASE)
     if marker:
@@ -82,21 +79,14 @@ def _distinctive_filename_tokens(filename: str) -> set[str]:
 def _reorder_headings_by_filename_match(headings: list[str], filename: str) -> list[str]:
     """A document can contain more than one plausible "heading" -- e.g. a
     floating text box's caption extracted ahead of the real title purely
-    because of where it's anchored in the file, not because it's what a
-    reader would see first on the page. Plain first-heading order can
-    silently assign the wrong product identity (e.g. a header banner like
-    "PORTABLE H2 LEAK DETECTOR" extracted before its own title paragraph,
-    "AURIGA").
+    by anchor position, not reading order. Plain first-heading order can
+    silently assign the wrong product identity.
 
-    Sorts by how many filename tokens each heading shares, not merely
-    whether it shares any: within one product family (e.g. "FIXaHY"),
-    several real headings all contain the shared brand word, including an
-    over-generic series-level banner ("FIXaHY LEAK DETECTOR SERIES"). A
-    boolean any-match can't tell that apart from the actual specific model
-    heading ("FIXaHY H2 LD XX"); an overlap count can, since the specific
-    heading shares every token (brand + target gas + type) while the
-    generic banner only shares the brand. Stable otherwise, so a document
-    with no match at all keeps its original order."""
+    Sorts by how many filename tokens each heading shares, not just
+    whether it shares any: an over-generic series banner ("FIXaHY LEAK
+    DETECTOR SERIES") shares only the brand, while the actual model
+    heading ("FIXaHY H2 LD XX") shares every token. Stable otherwise --
+    no match at all keeps the original order."""
     distinctive = _distinctive_filename_tokens(filename)
     if not distinctive:
         return headings
@@ -110,13 +100,10 @@ def _reorder_headings_by_filename_match(headings: list[str], filename: str) -> l
 
 
 def _is_long_placeholder_blob(token: str) -> bool:
-    """True for a token made entirely of repeated-letter pairs, 4+ chars
-    long -- e.g. "RRNNVVII" (the glued-together "RR* NN VV* II" ordering-
-    code placeholders). Deliberately requires 4+ chars so a short, genuine
-    suffix like "XX" is never touched -- several real product titles end
-    in "XX" as their own printed name (e.g. "FIXaHY H2 LD XX"), not a
-    placeholder Claude is guessing at; only a long blob like this is
-    unambiguously code, never a real word."""
+    """True for a token made of repeated-letter pairs, 4+ chars long --
+    e.g. "RRNNVVII" (glued ordering-code placeholders). Requires 4+ chars
+    so a genuine short suffix like "XX" (part of real product names) is
+    never mistaken for one."""
     token = token.rstrip("*")
     return (
         token.isalpha() and len(token) >= 4 and len(token) % 2 == 0
@@ -125,16 +112,11 @@ def _is_long_placeholder_blob(token: str) -> bool:
 
 
 def _clean_ordering_code_heading(heading: str) -> str:
-    """A document's own chosen title heading can itself be the ordering-
-    code template, rendered with hyphens instead of the tabs used in the
-    "Product Ordering Nomenclature" section further down -- e.g. the
-    4220MA catalogue's title heading is literally
-    "FIXaHY-G/P/E-4220MA-RRNNVVII", not a human-written product name.
-    Only cleans up when the heading contains an unmistakable code marker
-    (a slash-separated option list like "G/P/E", or a long repeated-
-    letter placeholder blob like "RRNNVVII") -- otherwise returns the
-    heading unchanged, so every other document's real printed title
-    (including ones that end in a short "XX") is left exactly as-is."""
+    """A document's title heading can itself be the ordering-code template
+    (e.g. "FIXaHY-G/P/E-4220MA-RRNNVVII"), not a human-written name. Only
+    cleans up when the heading has an unmistakable code marker (a
+    slash-separated option list, or a placeholder blob) -- otherwise
+    returns it unchanged."""
     tokens = re.split(r"[\s-]+", heading)
     if not any("/" in t or _is_long_placeholder_blob(t) for t in tokens):
         return heading
@@ -143,16 +125,11 @@ def _clean_ordering_code_heading(heading: str) -> str:
 
 
 def assign_product_name(document: dict[str, Any], other_documents: tuple[dict[str, Any], ...] = ()) -> str:
-    """Uses the document's own first heading as its product identity,
-    since catalogues put the product name first -- after reordering
-    candidates so a heading matching the filename's distinctive brand
-    token wins over one that merely happens to be extracted first (see
-    _reorder_headings_by_filename_match). When another document shares
-    the same heading at the same position -- e.g. two model variants
-    under one family name -- walks forward to the first heading that
-    actually differs between them, so the two don't collide onto the
-    same identity. Falls back to the filename when a document has no
-    headings at all."""
+    """Uses the document's first heading as its product identity (after
+    reordering via _reorder_headings_by_filename_match). When another
+    document shares the same heading at the same position, walks forward
+    to the first heading that differs, so the two don't collide onto the
+    same identity. Falls back to the filename if there are no headings."""
     filename = document.get("filename", "unknown")
     own_headings = _reorder_headings_by_filename_match(_document_headings(document), filename)
     other_heading_seqs = [
@@ -446,14 +423,10 @@ def chunk_document(
 
 
 def chunk_approved_claims(document_name: str, bullets: list[str]) -> list[Chunk]:
-    """One chunk per bullet -- deliberately bypasses chunk_document's
-    general word-count packing (see DEFAULT_CHUNK_SIZE's own comment:
-    "how many short facts share a chunk"). That packing is a good default
-    for a document's prose, where nearby short facts usually share
-    context, but Approved Claims bullets are independent, atomic facts
-    spanning unrelated topics (certifications, warranty, pricing, ...):
-    packing them together lets one bullet's embedding dominate the shared
-    chunk, burying the others from their own queries."""
+    """One chunk per bullet -- bypasses chunk_document's word-count packing,
+    since Approved Claims bullets are independent, atomic facts spanning
+    unrelated topics; packing them together would let one bullet's
+    embedding bury the others from their own queries."""
     total = len(bullets)
     return [
         Chunk(

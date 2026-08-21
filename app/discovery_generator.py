@@ -1,14 +1,12 @@
 #python -m app.discovery_generator "Customer wants to monitor a lead-acid battery room for hydrogen buildup"
 """Pre-call discovery questions, then (once the rep has captured the
 customer's answers) a grounded product recommendation -- one workflow, two
-stages, both reusing the same retrieval and LLM plumbing as
-answer_question(). Stage 1 identifies potential "Right to Win" points --
-documented product differentiators relevant to the use case -- each with
-its own supporting evidence and exploratory discovery questions (no claim-
-checking -- no product is recommended yet, just questions to ask). Stage 2
-matches the customer's actual answers against the knowledge base and
-reuses claim_checker, since a recommendation is exactly the kind of
-product claim that guardrail exists for."""
+stages, both reusing the retrieval/LLM plumbing answer_question() uses.
+Stage 1 identifies "Right to Win" points -- documented differentiators
+with supporting evidence and exploratory questions, no claim-checking
+since no product is recommended yet. Stage 2 matches the customer's
+answers against the knowledge base and reuses claim_checker, since a
+recommendation is exactly the kind of claim that guardrail exists for."""
 from __future__ import annotations
 
 import re
@@ -86,13 +84,10 @@ class DiscoveryResult:
 class RecommendationResult:
     """Outcome of matching the customer's captured discovery answers
     against the knowledge base. outcome is one of "Recommend",
-    "Trade-offs", "Insufficient". product is the single recommended
-    product's name on its own (blank for Trade-offs/Insufficient, where
-    there's no single clean answer); candidate_products is the 2+
-    product names being weighed against each other for a Trade-offs
-    outcome (empty otherwise) -- both kept separate from the
-    recommendation prose so the UI can show them prominently rather than
-    leaving them buried in a paragraph."""
+    "Trade-offs", "Insufficient". product is the single recommended name
+    (blank for Trade-offs/Insufficient); candidate_products is the 2+
+    names being weighed for a Trade-offs outcome -- both kept separate
+    from the recommendation prose so the UI can show them prominently."""
 
     confirmed_priorities: list[str]
     outcome: str
@@ -179,14 +174,11 @@ def stream_discovery_questions(
     use_case_description: str, top_k: int = 8
 ) -> tuple[list[dict[str, Any]], Iterator[str]]:
     """Streaming counterpart to generate_discovery_questions(). Returns
-    (matches, text_stream) -- stream text_stream to the UI (e.g. via
-    st.write_stream) for live display of the raw reply as it's generated,
-    then pass matches and the full text it returns to
-    finalize_discovery_questions() to get the parsed, ranked Right-to-Win
-    points. The raw reply is structured (repeating "Right to Win: ..."
-    blocks), so what streams live is that raw text, not pre-rendered
-    cards -- the properly parsed cards render once finalize_ runs, same
-    pattern as the Assistant page's streamed answer."""
+    (matches, text_stream) -- stream text_stream to the UI for live
+    display of the raw reply, then pass matches and the full text to
+    finalize_discovery_questions() for the parsed, ranked Right-to-Win
+    points. What streams live is the raw structured text, not pre-rendered
+    cards -- those render once finalize_ runs."""
     from app.retriever import retrieve
 
     retrieval = retrieve(use_case_description, top_k=top_k)
@@ -214,25 +206,18 @@ def stream_discovery_points(
 ) -> Iterator[tuple[list[RightToWinPoint], str, str]]:
     """Consumes a raw text_stream chunk by chunk, yielding
     (newly_completed_points, live_tail_text, full_text_so_far) after each
-    chunk. A point is only ever counted as complete once a further "Right
-    to Win:" title has appeared after its block -- that's what actually
-    proves the block finished, since the model could still be mid-way
-    through writing its last question. live_tail_text is whatever's been
-    generated for the point still in progress (or the raw start of the
-    reply before any title has appeared yet), for showing live streaming
-    text the same way the whole raw reply used to stream.
+    chunk. A point only counts as complete once a further "Right to Win:"
+    title appears after its block -- proof the model finished it, not
+    still mid-question. live_tail_text is the in-progress point's text so
+    far, for live display.
 
-    Lets a UI render each Right-to-Win card -- including its answer-
-    capture boxes -- as soon as that point is actually done, instead of
-    making a rep wait for the entire multi-point reply before seeing any
-    of them: a real reply can have 3-4 points with 3 questions each, and
-    reading + starting to ask point 1's questions doesn't need to wait on
-    point 4 still being generated.
+    Lets a UI render each Right-to-Win card as soon as it's done, rather
+    than waiting for the whole multi-point reply -- a rep can start on
+    point 1's questions while point 4 is still generating.
 
-    The very last point in the reply is never provably complete until the
-    stream itself ends -- callers should parse it via
-    finalize_discovery_questions(matches, full_text_so_far) once the
-    stream is exhausted, same as before."""
+    The last point is never provably complete until the stream ends --
+    callers parse it via finalize_discovery_questions(matches,
+    full_text_so_far) once exhausted."""
     accumulated = ""
     known_complete = 0
     for chunk in text_stream:
@@ -280,23 +265,17 @@ def generate_discovery_questions(use_case_description: str, top_k: int = 8) -> D
     return finalize_discovery_questions(matches, raw_reply)
 
 
-# ---------------------------------------------------------------------------
-# Qualification questions -- "living intelligence" V1: which of a deal's 8
-# MEDDPICC fields are still blank, and what to ask about them next. See
-# app/deals_store.py for the field list/schema and app/deal_page.py (once
-# built) for how an answer gets saved back. Deliberately NOT a framework-
-# selection system yet (no BANT/SPIN/Never Split the Difference here) --
-# see the architecture discussion this was scoped from: selection/
-# transitions are a V2 concern that needs real deal data to be worth
-# building against.
-# ---------------------------------------------------------------------------
+# Qualification questions -- which of a deal's 8 MEDDPICC fields are still
+# blank, and what to ask about them next. See app/deals_store.py for the
+# field list/schema; a rep's answer is saved via deals_store.
+# update_deal_fields(). Deliberately not a framework-selection system (no
+# BANT/SPIN/etc.) -- just the one MEDDPICC framework for now.
 
-# Which field is missing is deterministic (deals_store.missing_fields);
-# which order to ask them in is also deterministic, not LLM-judged -- this
-# is conversational priority informed by the methodology document's own
-# guidance (ask Identify Pain/Metrics early, via SPIN-style sequencing;
-# Decision Process/Paper Process only once the customer is already
-# engaged), not MEDDPICC_FIELDS' plain definitional order.
+# Which field is missing is deterministic (deals_store.missing_fields); so
+# is the order to ask them in -- conversational priority informed by the
+# methodology document's own guidance (ask Identify Pain/Metrics early;
+# Decision Process/Paper Process only once engaged), not MEDDPICC_FIELDS'
+# plain definitional order.
 _QUALIFICATION_PRIORITY = [
     "identify_pain",
     "metrics",
@@ -363,12 +342,10 @@ def stream_qualification_questions(
     deal, limit: int = 3, top_k: int = 6
 ) -> tuple[list[tuple[str, str, str]], list[dict[str, Any]], Optional[Iterator[str]]]:
     """Streaming counterpart to generate_qualification_questions(). deal
-    is a deals_store row. Returns (missing, matches, text_stream) --
-    missing is next_missing_fields(deal, limit), already computed since
-    finalize_qualification_questions() needs it as the deterministic
-    fallback for any field the LLM reply doesn't parse cleanly. Returns
-    (missing, [], None) with missing == [] if nothing is left to ask --
-    no LLM call is made in that case."""
+    is a deals_store row. Returns (missing, matches, text_stream) -- missing
+    is precomputed since finalize_qualification_questions() needs it as
+    the deterministic fallback for any field the reply doesn't parse.
+    Returns (missing, [], None), no LLM call, if nothing is left to ask."""
     missing = next_missing_fields(deal, limit)
     if not missing:
         return [], [], None
@@ -467,15 +444,12 @@ def _parse_recommendation_reply(raw_text: str) -> tuple[list[str], str, str, lis
     elif "recommend" in outcome_raw:
         outcome = "Recommend"
     else:
-        # Fail safe: anything unclear is treated as insufficient rather
-        # than risking an unwarranted recommendation.
+        # Fail safe: anything unclear is Insufficient, not an unwarranted
+        # recommendation.
         outcome = "Insufficient"
 
-    # Only a real Recommend outcome ever has a single clean product name
-    # -- "None" (the prompt's own instruction for the other two cases)
-    # or anything else written for a non-Recommend outcome is discarded
-    # rather than trusted, so the UI never shows a stray product name
-    # next to a Trade-offs/Insufficient outcome.
+    # Only Recommend ever has a real product name -- discard anything
+    # written for another outcome so the UI never shows a stray name.
     if outcome != "Recommend" or product.lower() == "none":
         product = ""
 
@@ -490,31 +464,22 @@ def _parse_recommendation_reply(raw_text: str) -> tuple[list[str], str, str, lis
 
 
 def _is_recommendable_product_document(document_name: str) -> bool:
-    """Sales-history/customer-record spreadsheets, use-case guides, and
-    other reference documents describe past deals or background
-    knowledge, not a purchasable product -- they're valid supporting
-    evidence in stage 1's Right-to-Win discovery (real deployment history
-    is good social proof), but must never be named as "the product" to
-    recommend here -- spreadsheet rows can read a lot like a
-    discovery-call description and dominate raw vector search, and no
-    prompt instruction alone reliably stops the model from citing one as
-    if it were a product. Driven by the explicit Admin-assigned document
-    type, not a filename/suffix guess, so this rules out any reference
-    document, not just spreadsheets."""
+    """Sales-history/customer-record spreadsheets and other reference
+    documents describe past deals, not a purchasable product -- valid
+    evidence in stage 1's Right-to-Win discovery, but must never be named
+    as "the product" to recommend, since spreadsheet rows can read like a
+    discovery-call description and dominate raw vector search. Driven by
+    the Admin-assigned document type, not a filename guess."""
     from app.document_types import is_product_catalogue
 
     return is_product_catalogue(document_name)
 
 
 def _fetch_recommendable_matches(query: str, top_k: int) -> list[dict[str, Any]]:
-    """Retrieves real product documents only (see
-    _is_recommendable_product_document), excluding non-product documents
-    (e.g. the sales-history spreadsheet) from the vector search itself
-    rather than filtering them out of the results afterward -- a
-    dominant non-product document can occupy the entire top-k regardless
-    of how wide it's fetched, leaving nothing usable behind no matter how
-    generous the over-fetch is. Excluding at the query level guarantees
-    the returned matches are usable."""
+    """Retrieves real product documents only, excluding non-product
+    documents from the vector search itself rather than filtering results
+    afterward -- a dominant non-product document could otherwise occupy
+    the entire top-k regardless of how wide it's fetched."""
     from app.retriever import all_document_names, retrieve
 
     exclude = {name for name in all_document_names() if not _is_recommendable_product_document(name)}
@@ -544,13 +509,11 @@ def stream_recommendation(
     top_k: int = 15,
 ) -> tuple[Optional[list[dict[str, Any]]], Optional[str], Optional[Iterator[str]]]:
     """Streaming counterpart to generate_recommendation(). qa_pairs is the
-    full list of (question, answer) pairs the rep recorded; unanswered
-    ones (blank answer) are ignored. Returns (None, None, None) if there
-    isn't enough evidence yet -- no LLM call is made in that case; the
-    caller should render insufficient_recommendation(answered_count)
-    directly instead. Otherwise returns (matches, qa_block, text_stream):
-    stream text_stream to the UI, then pass matches, qa_block, and the
-    full text it returns to finalize_recommendation()."""
+    full list of (question, answer) pairs recorded; unanswered ones are
+    ignored. Returns (None, None, None), no LLM call, if there isn't
+    enough evidence yet -- caller should render
+    insufficient_recommendation(answered_count) instead. Otherwise returns
+    (matches, qa_block, text_stream) for finalize_recommendation()."""
     answered = [(q, a.strip()) for q, a in qa_pairs if a and a.strip()]
     if len(answered) < MIN_ANSWERS_FOR_RECOMMENDATION:
         return None, None, None

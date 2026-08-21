@@ -1,17 +1,15 @@
 """Explicit document classification for data/approved_docs -- what an
-admin assigns at upload time in the Documents tab, replacing the old
-filename-pattern guessing (a document was "eligible as a product" unless
-its name happened to contain "comparison"/"competitor"/"guide"). That
-heuristic broke twice in one session on documents that didn't happen to
-match the pattern -- this makes the classification an explicit, stored
-choice instead of an inference.
+admin assigns at upload time in the Documents tab. An explicit, stored
+choice rather than a filename-pattern guess, since a heuristic like
+"eligible as a product unless the name contains comparison/competitor/
+guide" is too easy to fool by a document whose name just doesn't happen
+to match.
 
 Drives two things: which documents populate the Product Registry /
 single-product scoping (Product Catalogue only), and which documents the
 main Assistant can retrieve at all (see MAIN_ASSISTANT_EXCLUDED_TYPES).
 
-Backed by Postgres (Neon) when app.db.is_postgres_enabled() -- see
-app.deals_store's module docstring for why.
+Backed by Postgres (Neon) when app.db.is_postgres_enabled().
 """
 from __future__ import annotations
 
@@ -24,12 +22,10 @@ from app import db
 
 TYPES_PATH = Path("data/document_types.json")
 
-# get_document_type() is called once per document in a loop (see
-# admin_page._render_documents_tab) -- against Postgres, that's one
-# round trip per document instead of one for the whole table. A short
-# TTL collapses those into a single real query per render; save_
-# document_types() also clears it directly, so an admin's own edit is
-# never waiting on the TTL to expire.
+# get_document_type() is called once per document in a loop, which
+# against Postgres means one round trip per document -- a short TTL
+# collapses those into one query per render. save_document_types() also
+# clears the cache directly, so an admin's own edit never waits on the TTL.
 _CACHE_TTL_SECONDS = 3
 _cache: tuple[float, dict[str, str]] | None = None
 
@@ -52,18 +48,13 @@ ALL_TYPES = [
 ]
 
 # Types excluded from the main Assistant -- a retrieved chunk there goes
-# straight into a rep-visible answer with no guardrail in between it,
-# unlike Discovery Questions (stays internal, with the rep) or Sales Aid
-# (Claim-Checker gated before anything reaches a customer). OTHER is
-# deliberately NOT included here -- an uncategorized document isn't
-# necessarily unsafe, and building that enforcement is a separate,
-# not-yet-requested decision; for now OTHER behaves like Use Case Guide/
-# Technical Guide (open, but never Product-Registry-eligible).
-# Sales Methodology Reference is excluded for the same reason as Internal
-# Sales Strategy -- negotiation tactics and qualification-question
-# scripts are for internal coaching use, not something the main Assistant
-# should ever surface into a rep-facing answer that could get relayed to
-# a customer.
+# straight into a rep-visible answer with no guardrail in between, unlike
+# Discovery Questions (stays internal) or Sales Aid (Claim-Checker gated).
+# Internal Sales Strategy and Sales Methodology Reference are both
+# internal coaching content, never meant to reach a rep-facing answer
+# that could get relayed to a customer. OTHER is deliberately not
+# included -- an uncategorized document isn't necessarily unsafe, so it
+# behaves like Use Case Guide/Technical Guide (open, not Registry-eligible).
 MAIN_ASSISTANT_EXCLUDED_TYPES = {INTERNAL_SALES_STRATEGY, SALES_METHODOLOGY_REFERENCE}
 
 
@@ -126,13 +117,10 @@ def remove_document_type(document_name: str) -> None:
 
 def is_product_catalogue(document_name: str) -> bool:
     """True only if explicitly classified as Product Catalogue --
-    deliberately NOT the default for an unclassified document. The old
-    heuristic defaulted to "yes, it's a product" unless the filename
-    looked like a reference doc, which is exactly what let two different
-    reference documents get silently added to the Product Registry this
-    session. Erring the other way means an unclassified document is
-    invisible to the registry until someone consciously classifies it,
-    not silently treated as a purchasable product."""
+    deliberately NOT the default for an unclassified document. An
+    unclassified document stays invisible to the registry until someone
+    consciously classifies it, rather than being silently treated as a
+    purchasable product."""
     return get_document_type(document_name) == PRODUCT_CATALOGUE
 
 

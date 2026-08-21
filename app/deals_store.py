@@ -1,33 +1,23 @@
 """Stores Deal records in a local SQLite database -- the persistence
-layer behind Discovery's qualification-question flow (see
-app/discovery_generator.py), so a rep's captured MEDDPICC answers for a
-customer survive between visits instead of living only in browser
-session state.
+layer behind Discovery's qualification-question flow, so a rep's
+captured MEDDPICC answers for a customer survive between visits instead
+of living only in browser session state.
 
-Deliberately minimal, per the agreed V1 scope: a deal is just an id,
-customer_name, company, use_case, the 8 MEDDPICC fields, and its last
-Right-to-Win generation, qualification-question generation, and product
-recommendation (see save_discovery/save_qualification/
-save_recommendation and their get_ counterparts). No stage,
-stakeholders, interaction history, framework selection, or risk score
-yet -- those depend on real usage data existing first, which this
-table is what starts accumulating.
+A deal is just an id, customer_name, company, use_case, the 8 MEDDPICC
+fields, and its last Right-to-Win/qualification-question/recommendation
+generation (see save_discovery/save_qualification/save_recommendation
+and their get_ counterparts).
 
-Keyed by an internal id, not by customer_name/company -- the same
-company can have multiple distinct deals (e.g. "ABC Industries --
-Electrolyzer Project" and "ABC Industries -- Portable Detector Order"),
-which a customer/company key would silently collapse into one record.
-customer_name/company are for display and search, not identity.
+Keyed by an internal id, not customer_name/company -- the same company
+can have multiple distinct deals, which a customer/company key would
+silently collapse into one record.
 
-Backed by Postgres (Neon) when app.db.is_postgres_enabled() -- a deal
-captured through Streamlit Community Cloud's ephemeral filesystem would
-otherwise vanish on the next redeploy or cold start. Falls back to the
-original local SQLite file when DATABASE_URL isn't set, so local dev/
-tests never need a live connection. Every function still returns
-something dict-like (sqlite3.Row supports both row["col"] and row[0];
-the Postgres path returns plain dicts via psycopg's dict_row, which only
-support row["col"] -- every caller in this codebase already uses
-key-based access, never positional, so this is a safe swap)."""
+Backed by Postgres (Neon) when app.db.is_postgres_enabled() -- otherwise
+a deal captured on Streamlit Cloud's ephemeral filesystem would vanish on
+the next redeploy. Falls back to local SQLite when DATABASE_URL isn't
+set. Every function returns something dict-like regardless of backend --
+every caller here uses key-based access (row["col"]), never positional,
+so the sqlite3.Row/psycopg dict_row swap is safe."""
 from __future__ import annotations
 
 import json
@@ -80,13 +70,9 @@ def _connect() -> sqlite3.Connection:
         """
     )
     existing_columns = {row[1] for row in conn.execute("PRAGMA table_info(deals)")}
-    # Nullable JSON blobs, all added after MEDDPICC_FIELDS existed --
-    # last_recommendation (discovery_generator.RecommendationResult.
-    # to_dict()), last_discovery ({"right_to_win": [RightToWinPoint.
-    # to_dict(), ...], "answers": {question: answer}}), and
-    # last_qualification ([QualificationQuestion.to_dict(), ...]). Persists
-    # Right-to-Win results and a rep's typed answers across page navigation,
-    # not just browser session state.
+    # Nullable JSON blobs, added after MEDDPICC_FIELDS existed -- persist
+    # Right-to-Win results and a rep's typed answers across page
+    # navigation, not just browser session state.
     for column in ("last_recommendation", "last_discovery", "last_qualification"):
         if column not in existing_columns:
             conn.execute(f"ALTER TABLE deals ADD COLUMN {column} TEXT")

@@ -1,18 +1,13 @@
 """Hydrogen concentration as a domain value, not a primitive string or
-number. 100% LEL = 4% H2 v/v = 40,000 ppm is a fixed physical constant for
-hydrogen specifically, identical across every product catalogue in the
-approved knowledge base -- so one conversion ratio serves every product;
-this is not per-product data.
+number. 100% LEL = 4% H2 v/v = 40,000 ppm is a fixed physical constant
+for hydrogen, identical across every product catalogue -- one conversion
+ratio serves every product; this is not per-product data.
 
-Two reasons this needs to be a real conversion, not left to the LLM:
-1. The Product Registry stores range values that mix units within one
-   product's own table (e.g. PORTaHY: "2,000 PPM H2 v/v" alongside
-   "4% H2 v/v"), which is unusable for any "does this range cover X"
-   comparison without a shared representation.
-2. A model can confidently compute conversion arithmetic wrong (e.g.
-   15,000 ppm as 6% instead of the correct 1.5%) -- the same class of
-   problem as every other deterministic check in this codebase: don't
-   trust the model with something code can get exactly right.
+Needs to be a real conversion, not left to the LLM: the Product Registry
+mixes units within one product's own table (e.g. "2,000 PPM H2 v/v"
+alongside "4% H2 v/v"), unusable for a range comparison without a shared
+representation; and a model can confidently miscompute the arithmetic
+(e.g. 15,000 ppm as 6% instead of 1.5%).
 """
 from __future__ import annotations
 
@@ -100,11 +95,9 @@ def parse_concentration(text: str) -> Optional[HydrogenConcentration]:
 
 def parse_concentration_range(text: str) -> Optional[ConcentrationRange]:
     """A registry "Range Full Scale" value documents a single full-scale
-    endpoint (e.g. "2,000 PPM H2 v/v") -- 0 is the implicit start. Verified
-    directly against each product's own "Selectable Parameters"/"Selectable
-    range" table, not assumed from one and generalized: 4220MA, PORTaHY,
-    and AURIGA each state "Start: 0 ppm/0%" explicitly for every one of
-    their range options."""
+    endpoint (e.g. "2,000 PPM H2 v/v") -- 0 is the implicit start, per
+    every product's own "Selectable range" table, which states "Start:
+    0 ppm/0%" explicitly for each range option."""
     end = parse_concentration(text)
     if end is None:
         return None

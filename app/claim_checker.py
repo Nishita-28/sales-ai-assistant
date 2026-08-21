@@ -17,20 +17,16 @@ NONE_CATEGORY = "None"
 
 POLICY_PATH = Path("data/restricted_claims.yaml")
 
-# Indexed alongside the real approved documents (see
-# retriever.load_and_chunk_approved_docs) so admin-entered Approved Claims
-# text is retrievable and can inform an answer -- but it's admin-typed,
-# not independently verified against the approved documents at check
-# time, so it must not be able to satisfy a restricted-category claim
-# (pricing, certifications, safety, delivery) on its own. See
-# guardrail_source_text below.
+# Indexed alongside the real approved documents so admin-entered Approved
+# Claims text is retrievable, but it's admin-typed and not independently
+# verified, so it can't satisfy a restricted-category claim on its own --
+# see guardrail_source_text below.
 APPROVED_CLAIMS_DOCUMENT_NAME = "approved_claims.md"
 
-# Postgres has no file mtime to key invalidation off, so this caches for
-# a short, fixed window instead -- long enough to spare a Postgres round
-# trip on every single question, short enough that a just-saved Restricted
-# Claims edit takes effect within a few seconds rather than requiring a
-# restart. The local-file path still uses mtime, which is exact.
+# Postgres has no file mtime to key invalidation off, so this caches for a
+# short fixed window instead -- long enough to spare a round trip per
+# question, short enough that a Restricted Claims edit takes effect within
+# seconds. The local-file path still uses mtime, which is exact.
 _POSTGRES_CACHE_TTL_SECONDS = 5
 
 _policy_cache: Optional[tuple[float, dict[str, list[str]], set[str]]] = None
@@ -117,12 +113,10 @@ class ClaimCheckResult:
 
 def guardrail_source_text(matches: list[dict[str, Any]]) -> str:
     """Joins retrieved-chunk text for the restricted-claims support check,
-    excluding anything sourced from Approved Claims -- a restricted-
-    category claim (pricing, certifications, safety, delivery) must still
-    be backed by a real approved document to count as supported, not just
-    an admin-typed reference bullet. Approved Claims chunks ARE still
-    retrieved and used to help answer everything else; this only affects
-    what check_restricted_claims is allowed to treat as evidence."""
+    excluding Approved Claims chunks -- a restricted-category claim must
+    be backed by a real approved document, not an admin-typed bullet.
+    Approved Claims is still retrieved and used for everything else; this
+    only affects what counts as supporting evidence here."""
     return " ".join(
         m.get("text", "") for m in matches
         if m.get("metadata", {}).get("document_name") != APPROVED_CLAIMS_DOCUMENT_NAME

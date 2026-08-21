@@ -41,18 +41,15 @@ def _apply_nomenclature_notes(retrieval: dict[str, Any], result) -> dict[str, An
 
 def answer_question(question: str) -> dict[str, Any]:
     """Runs one question through the full pipeline and returns a structured
-    result dict. Raises RetrieverError or ResponseGeneratorError on failure.
-    Non-streaming -- for CLI/scripted use. The UI uses stream_answer_question()
-    instead so the answer can display live as it's generated. Does not
-    generate customer-facing wording -- call get_customer_wording()
-    separately, on demand, once a rep actually asks for one.
+    result dict. Raises RetrieverError or ResponseGeneratorError on
+    failure. Non-streaming -- the UI uses stream_answer_question() instead
+    so the answer displays live. Does not generate customer-facing
+    wording; call get_customer_wording() separately, on demand.
 
-    Checks the dispatcher first (Points 3-6): a catalog/filter question or
-    a specific nomenclature code gets answered directly from the Product
-    Index, no LLM involved; a single resolved product scopes retrieval to
-    just its own catalogue before generating normally; anything else
-    (including a genuine multi-product comparison) falls through to the
-    original, unscoped flow exactly as before."""
+    Checks the dispatcher first: a catalog/filter question or nomenclature
+    code gets answered directly from the Product Index, no LLM involved;
+    a single resolved product scopes retrieval to its own catalogue;
+    anything else falls through to the original, unscoped flow."""
     intent: Intent = classify_intent(question)
     result = dispatch(question)
 
@@ -62,19 +59,16 @@ def answer_question(question: str) -> dict[str, Any]:
     else:
         # main_assistant_excluded_document_names() is merged in
         # unconditionally, on top of whatever dispatch() decided -- these
-        # internal-strategy documents must never reach the main Assistant
-        # regardless of scoping, since (unlike Sales Aid/Discovery)
-        # nothing here gates a retrieved chunk before it reaches a
-        # rep-visible answer.
+        # internal-strategy documents must never reach the Assistant,
+        # since nothing here gates a chunk before it reaches a rep.
         exclude = (result.exclude_document_names if result is not None else set()) | main_assistant_excluded_document_names()
         mentioned = result.scoped_product_names if result is not None else None
         retrieval = retrieve(question, exclude_document_names=exclude, mentioned_products=mentioned)
         retrieval = _apply_nomenclature_notes(retrieval, result)
         # dispatch() already resolved the product reference deterministically
-        # for a "scoped" result -- skip response_generator's own, older,
-        # weaker is_ambiguous_product_reference() check, which doesn't know
-        # about technology-alias/typo resolution and would otherwise
-        # override a correct answer with a generic "which product?" message.
+        # for a "scoped" result -- skip response_generator's own, weaker
+        # check, which would otherwise override a correct answer with a
+        # generic "which product?" message.
         skip_ambiguity_check = result is not None and result.kind == "scoped"
         generated = generate_answer(question, retrieval, intent, skip_ambiguity_check)
 

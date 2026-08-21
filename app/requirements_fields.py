@@ -1,28 +1,23 @@
 """Admin-editable field definitions for the Customer Requirement Capture
-page's generic questions (Customer Name, Industry, Certifications, etc.) --
-NOT the per-product nomenclature dropdowns, which stay fully driven by the
-Product Index/approved catalogues (see requirements_page._selectable_segments)
-since those are grounded facts, not a form-design preference.
+page's generic questions (Customer Name, Industry, Certifications, etc.)
+-- not the per-product nomenclature dropdowns, which stay fully driven by
+the Product Index/approved catalogues since those are grounded facts,
+not a form-design preference.
 
-JSON-backed at data/requirements_fields.json, following the same pattern as
-app.document_types. Seeded with the form's original hardcoded field set
-(DEFAULT_FIELDS) so first load reproduces exactly today's form.
+JSON-backed at data/requirements_fields.json, seeded with the form's
+original hardcoded field set (DEFAULT_FIELDS) so first load reproduces
+today's form.
 
-Every default field is marked "core": True -- it's tied to a real, typed
-column in requirements_store.py (and, for certifications, to real
-validation/warning logic in requirements_page.py) that can't just be
-dropped. Admin can rename, relabel, edit options for, or hide a core
-field, but not delete it outright -- see _merge_core_fields below for
-why. A custom (non-core) field the admin adds has none of that: it can
-be freely added, edited, or removed, and its answers are stored
-generically (see requirements_page._collect_custom_values).
+Every default field is marked "core": True -- tied to a real, typed
+column in requirements_store.py that can't just be dropped, so an admin
+can rename/relabel/edit it but not delete it outright (see
+_merge_core_fields). A custom field an admin adds has none of that
+restriction, and its answers are stored generically.
 
 Customer Name/Company are NOT in this list -- they come from the deal
-picker (app.deal_picker) now, the same identity Pre-Call Discovery uses,
-not a form field an admin can relabel or hide.
+picker now, not a form field an admin can relabel or hide.
 
-Backed by Postgres (Neon) when app.db.is_postgres_enabled() -- see
-app.deals_store's module docstring for why.
+Backed by Postgres (Neon) when app.db.is_postgres_enabled().
 """
 from __future__ import annotations
 

@@ -2,17 +2,15 @@
 directory into Postgres (Neon), so the first Streamlit Cloud deployment
 doesn't start from an empty knowledge base and empty history.
 
-Run once, locally, with DATABASE_URL pointed at the Neon project (via
-.env or the environment) -- NOT something the app runs itself on every
-boot, since re-running this after real admin edits have already landed
-in Neon would silently overwrite them with whatever's still sitting in
-the local files.
+Run once, locally, with DATABASE_URL pointed at the Neon project -- not
+something the app runs itself on every boot, since re-running this after
+real admin edits have landed in Neon would silently overwrite them with
+whatever's still sitting in the local files.
 
     python -m scripts.seed_neon
 
-Safe to re-run before any real Postgres data exists (e.g. after fixing
-a mistake) -- everything below is a full replace of its own table(s),
-same as the store modules' own save_*() functions.
+Safe to re-run before any real Postgres data exists -- every step here is
+a full replace of its own table(s).
 """
 from __future__ import annotations
 
@@ -49,15 +47,12 @@ def _require_postgres() -> None:
 
 class _read_from_local_files:
     """Every load_*/save_* store function is Postgres-aware, and
-    DATABASE_URL is set for the whole duration of this script -- so a
-    plain load_claims()/load_entries()/load_document_types() call here
-    would read whatever's already in Postgres (leftovers from earlier
-    testing, or nothing), not the real local files this script exists
-    to seed FROM. This context manager forces db.is_postgres_enabled()
-    to report False for its duration, so a load_*() call inside it goes
-    through each store's original local-file branch -- the write side
-    (save_*()) still runs after the `with` block ends, with Postgres
-    correctly enabled again, so the actual seeding still lands in Neon."""
+    DATABASE_URL is set for this whole script -- so a plain load_*() call
+    here would read whatever's already in Postgres, not the local files
+    this script exists to seed FROM. Forces db.is_postgres_enabled() to
+    report False for its duration so load_*() goes through the local-file
+    branch; save_*() still runs after the `with` block ends, with
+    Postgres enabled again."""
 
     def __enter__(self) -> None:
         self._original = db.is_postgres_enabled

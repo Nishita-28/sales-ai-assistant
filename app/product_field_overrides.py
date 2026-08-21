@@ -1,33 +1,24 @@
 """Admin edits to a specific product's selectable fields -- adding a
 brand-new one, editing a catalogue-extracted one's options, or hiding
-one entirely (whether it came from the catalogue or was admin-added).
+one entirely.
 
 Deliberately kept OUT of data/product_registry.json: that file is fully
-regenerated from the approved catalogues on every reindex/rebuild (see
-registry_builder.rebuild_product_registry) -- anything written directly
-into it would be silently wiped out the next time a document is added,
-removed, or the index is rebuilt. This is a separate, persistent JSON
-store, following the same pattern as app.requirements_fields, merged
-in at read time by requirements_page.py (see effective_additional_params)
-rather than baked into the registry itself.
+regenerated from the approved catalogues on every reindex/rebuild, so
+anything written directly into it would be silently wiped out. This is a
+separate, persistent JSON store, merged in at read time by
+requirements_page.py (effective_additional_params).
 
-Keyed by product_name (the registry's own canonical name, e.g. "VISION
-H2 LD XX") -- not by source_catalogue or family, since that's exactly
-what requirements_page.py already looks products up by.
+Keyed by product_name, the registry's own canonical name.
 
 Shape on disk: {product_name: {"fields": {label: {"type": str, "options":
-{option: description}}}, "hidden": [label, ...]}}. "fields" covers both
-a brand-new admin-added label AND an edit-override of a catalogue label
-(same mechanism -- editing just means "fields" now has an entry for a
-label the catalogue also produces, and that entry wins). "hidden" covers
-deleting a field regardless of where it came from; a hidden label is
-suppressed even if "fields" also has an entry for it (delete wins over a
-stale edit). "type" is one of app.requirements_fields.FIELD_TYPES --
-defaults to "select" for a catalogue-extracted label, since a real
+{option: description}}}, "hidden": [label, ...]}}. "fields" covers both a
+brand-new admin-added label and an edit-override of a catalogue label
+(same mechanism -- an entry for that label just wins). "hidden" covers
+deleting a field regardless of origin; delete wins over a stale edit.
+"type" defaults to "select" for a catalogue-extracted label, since a real
 "Selectable <X>" table is always a single choice.
 
-Backed by Postgres (Neon) when app.db.is_postgres_enabled() -- see
-app.deals_store's module docstring for why."""
+Backed by Postgres (Neon) when app.db.is_postgres_enabled()."""
 from __future__ import annotations
 
 import time
@@ -42,13 +33,10 @@ from app import db
 OVERRIDES_PATH = Path("data/product_field_overrides.json")
 
 # get_fields()/get_hidden()/effective_additional_params() each call
-# load_overrides() independently, and a single product's field render
-# (admin_page._effective_product_fields) calls several of those in a
-# row -- against Postgres, that's 4+ separate round trips for what's
-# really one small table. A short TTL collapses those into one real query
-# per render while still picking up a save within a couple of reruns --
-# save_overrides() also clears it directly, so an admin's own edit is
-# never waiting on the TTL to expire.
+# load_overrides() independently, so one product's field render can mean
+# 4+ separate Postgres round trips for one small table -- a short TTL
+# collapses those into one query per render. save_overrides() also clears
+# it directly, so an admin's own edit never waits on the TTL.
 _CACHE_TTL_SECONDS = 3
 _cache: tuple[float, dict[str, dict[str, Any]]] | None = None
 
@@ -142,18 +130,13 @@ def unhide_field(product_name: str, label: str) -> None:
 def effective_additional_params(product: Any) -> dict[str, dict[str, Any]]:
     """The full, final {label: {"type": str, "options": {option:
     description}}} this product should show as freeform selectable specs
-    (i.e. everything EXCEPT real ordering-code segments -- see
-    requirements_page.py's own choosable_segments, which handles those
-    separately and consults is_nomenclature_label_active/label_override
-    below for the same hide/edit rules). Combines, in order: the
-    catalogue's own additional_selectable_parameters (registry_builder's
-    auto-extraction -- always type "select", the only shape a real
-    "Selectable <X>" table produces), a catalogue ordering-code label
-    that's been edited here (edit "promotes" it out of the order-code
-    system -- see is_nomenclature_label_active), and any brand-new
-    admin-added label -- each step skipping anything hidden, and letting
-    a "fields" override replace the catalogue's own content for that
-    label."""
+    -- everything except real ordering-code segments, which
+    requirements_page.py's choosable_segments handles separately.
+    Combines, in order: the catalogue's own additional_selectable_parameters
+    (always type "select"), a catalogue ordering-code label that's been
+    edited here (edit "promotes" it out of the order-code system), and any
+    brand-new admin-added label -- skipping anything hidden, letting a
+    "fields" override replace the catalogue's own content."""
     fields = get_fields(product.product_name)
     hidden = get_hidden(product.product_name)
     nomenclature_labels = (
@@ -180,12 +163,10 @@ def effective_additional_params(product: Any) -> dict[str, dict[str, Any]]:
 def is_nomenclature_label_hidden_or_edited(product_name: str, label: str) -> bool:
     """True if a real ordering-code segment's label has been hidden or
     edited here -- requirements_page.py's choosable_segments loop must
-    exclude it in either case: hidden means don't show it at all,
-    edited means it's now rendered (with the override's content) via
-    effective_additional_params instead, not as an ordering-code
-    dropdown -- an admin-supplied option set can't be trusted to still
-    contain the product's real order-code letters, so it stops
-    contributing to the suggested product code once edited."""
+    exclude it either way: hidden means don't show it, edited means it
+    now renders via effective_additional_params instead, since an
+    admin-supplied option set can't be trusted to still contain the
+    product's real order-code letters."""
     hidden = get_hidden(product_name)
     fields = get_fields(product_name)
     return label in hidden or label in fields

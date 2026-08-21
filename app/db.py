@@ -1,21 +1,9 @@
-"""Postgres (Neon) connection layer -- the durable persistence backing
-every admin-mutable store (deals, requirements, feedback, sales aids,
-Approved/Restricted Claims, document metadata + bytes, and the small
-config JSON stores) when DATABASE_URL is configured.
-
-Streamlit Community Cloud's filesystem is ephemeral: anything written to
-local disk (SQLite files, uploaded documents, the Chroma index) is gone
-on the next redeploy or cold start. Every store module in this app
-checks is_postgres_enabled() and, when true, reads/writes through here
-instead of local SQLite/JSON/YAML files -- falling back to each store's
-original local-file behavior when DATABASE_URL isn't set, so local
-development and tests never need a live Neon connection.
-
-DATABASE_URL is read from st.secrets first, then the environment,
-matching app.streamlit_app.get_admin_password's own secrets-then-env
-pattern -- use Neon's *pooled* connection string (PgBouncer-backed),
-not the direct one, since a Streamlit app can hold several concurrent
-connections across sessions/reruns.
+"""Postgres (Neon) connection layer -- durable persistence for every
+admin-mutable store when DATABASE_URL is set. Streamlit Cloud's
+filesystem is ephemeral, so stores fall back to local SQLite/JSON/YAML
+when it isn't (no live DB needed locally or in tests). Use Neon's
+*pooled* connection string, not the direct one -- a Streamlit app holds
+several concurrent connections across sessions/reruns.
 """
 from __future__ import annotations
 
@@ -30,20 +18,15 @@ from psycopg_pool import ConnectionPool
 
 
 class DatabaseUnavailableError(RuntimeError):
-    """Raised when DATABASE_URL is configured but the connection (or a
-    query against it) fails. Deliberately never swallowed into a silent
-    fallback to local files -- that would write an admin's change
-    somewhere they don't expect, then quietly lose it on the next
-    redeploy without ever telling them. Every store surfaces this as a
-    real st.error() in the Admin UI rather than pretending the save
-    succeeded."""
+    """Raised when DATABASE_URL is set but a connection or query fails.
+    Never falls back to local files silently -- stores surface this as a
+    real st.error() instead, so an admin's change isn't lost unnoticed."""
 
 
 def get_database_url() -> Optional[str]:
-    """None means "use local SQLite/file storage" -- every store checks
-    this before deciding which backend to use. Wrapped in try/except
-    because st.secrets raises if no secrets.toml exists at all (the
-    normal case for local dev), not just when the one key is missing."""
+    """None means "use local file storage". Checks st.secrets first, then
+    the environment; wrapped in try/except since st.secrets raises when
+    no secrets.toml exists (the normal local-dev case)."""
     try:
         import streamlit as st
 
@@ -62,22 +45,10 @@ _pool: Optional[ConnectionPool] = None
 
 
 def _get_pool() -> ConnectionPool:
-    """A small process-level pool of warm connections, opened lazily on
-    first use. A fresh psycopg.connect() per query pays a full TCP/TLS
-    handshake to Neon every time (measured at ~0.5s each, even against
-    Neon's own pooled endpoint) -- with several queries per page render,
-    that overhead dominates page-load time. Reusing pooled connections
-    across calls avoids paying it more than once per connection's
-    lifetime.
-
-    check=ConnectionPool.check_connection pings a connection before handing
-    it out and transparently replaces it if that fails -- Neon's free tier
-    suspends its compute after 5 minutes of no activity, which silently
-    kills any connection sitting idle in the pool; without this check, the
-    pool hands that dead connection straight to the caller instead of a
-    live one. max_idle is set below Neon's own suspend window for the same
-    reason: a connection recycled at 4 minutes never survives long enough
-    idle to be the one Neon killed."""
+    """Process-level pool of warm connections, opened lazily -- avoids a
+    fresh handshake to Neon on every query. check_connection replaces a
+    dead connection before handing it out, since Neon's free tier
+    suspends after 5 min idle; max_idle=240 stays under that window."""
     global _pool
     if _pool is None:
         url = get_database_url()
@@ -99,34 +70,17 @@ def _get_pool() -> ConnectionPool:
     return _pool
 
 
-# How many times to retry actually borrowing/using a connection before
-# giving up -- separate from the pool's own internal connect_timeout,
-# this covers the case where Neon's compute is mid-wake-up and needs
-# another attempt a moment later rather than one attempt at a fixed
-# timeout. Bounded rather than infinite: this same function backs the
-# once-per-process cold-start sync (see streamlit_app.py), which every
-# visitor waits on together -- an unbounded retry there would hang the
-# whole app for everyone, not just the one caller who hit the bad
-# connection, and if the real cause isn't transient (wrong credentials,
-# a deleted/suspended project), no amount of retrying fixes it anyway.
-# Kept deliberately tight (worst case ~36s: 3 attempts x up to the
-# pool's own 10s timeout, 3s apart) -- this is the ONLY retry layer,
-# not stacked under a second one at the caller level (see
-# streamlit_app.py's DatabaseUnavailableError handler, which does not
-# retry again itself, for why that matters).
+# Bounded, not infinite -- this same path backs the shared cold-start sync
+# in streamlit_app.py, and an unbounded retry there would hang the app for
+# every visitor waiting on it together.
 _CONNECT_RETRY_ATTEMPTS = 3
 _CONNECT_RETRY_DELAY_SECONDS = 3
 
 
 def _discard_pool() -> None:
-    """Closes and drops the current pool so the next _get_pool() call
-    builds a genuinely new one -- a failed connection attempt might mean
-    one bad connection (already handled by check=ConnectionPool.
-    check_connection), or it might mean the pool object itself is in a
-    bad state (its background workers wedged, its own reconnect budget
-    exhausted); retrying against the same pool object can't distinguish
-    those, so a failure discards it rather than assuming it's still
-    healthy."""
+    """Drops the pool so the next _get_pool() call builds a fresh one --
+    a failed attempt may mean the pool itself is unhealthy, not just one
+    bad connection."""
     global _pool, _schema_ensured
     if _pool is not None:
         try:
@@ -139,20 +93,10 @@ def _discard_pool() -> None:
 
 @contextmanager
 def get_connection() -> Iterator[psycopg.Connection]:
-    """Borrows a connection from the pool, committed on clean exit, rolled
-    back and re-raised as DatabaseUnavailableError on failure. The
-    connection returns to the pool afterward rather than closing, so the
-    next call can reuse it.
-
-    Retries a few times before giving up -- Neon's free tier suspends its
-    compute after inactivity, and waking it back up can occasionally take
-    longer than a single connection attempt allows for. A transient
-    failure here should read as "wait and try again," not "the database
-    is gone," so a caller only sees DatabaseUnavailableError once every
-    retry has failed too. Each failed attempt discards the pool first
-    (see _discard_pool), so a retry is a genuinely fresh connection
-    attempt, not another request to a pool that may itself be the
-    problem."""
+    """Borrows a connection from the pool; commits on clean exit, rolls
+    back and raises DatabaseUnavailableError on failure. Retries a few
+    times first, since waking a suspended Neon compute can be slower than
+    one attempt allows."""
     last_error: Optional[Exception] = None
     for attempt in range(_CONNECT_RETRY_ATTEMPTS):
         if attempt > 0:
@@ -168,8 +112,7 @@ def get_connection() -> Iterator[psycopg.Connection]:
                     raise DatabaseUnavailableError(f"Database operation failed: {e}") from e
             return
         except DatabaseUnavailableError:
-            # A query/commit against a live connection failed for its own
-            # reason (bad SQL, a constraint, etc.) -- retrying won't help.
+            # A query/commit failure is not transient -- retrying won't help.
             raise
         except Exception as e:
             last_error = e
@@ -197,27 +140,21 @@ def fetch_one(sql: str, params: tuple = ()) -> Optional[dict[str, Any]]:
 
 
 def execute_rowcount(sql: str, params: tuple = ()) -> int:
-    """Runs one write statement and returns how many rows it affected --
-    for a bulk DELETE/UPDATE whose caller reports back how much it did
-    (e.g. "cleared 12 old feedback rows")."""
+    """Runs a write statement and returns how many rows it affected."""
     with get_connection() as conn:
         cursor = conn.execute(sql, params)
         return cursor.rowcount
 
 
 def execute_returning(sql: str, params: tuple = ()) -> Any:
-    """For an INSERT ... RETURNING <col> -- returns that column's value
-    from the first (only) returned row."""
+    """For INSERT ... RETURNING <col> -- returns that column's value."""
     with get_connection() as conn:
         row = conn.execute(sql, params).fetchone()
         return list(row.values())[0] if row else None
 
 
-# ---------------------------------------------------------------------------
-# Schema -- every table this app's admin-mutable data lives in. Created
-# once per process on first use (see ensure_schema); CREATE TABLE IF NOT
-# EXISTS throughout, so it's always safe to call again.
-# ---------------------------------------------------------------------------
+# Every table this app's admin-mutable data lives in. CREATE TABLE IF NOT
+# EXISTS throughout, so ensure_schema() is safe to call repeatedly.
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS deals (
     id SERIAL PRIMARY KEY,
@@ -316,9 +253,7 @@ CREATE TABLE IF NOT EXISTS product_field_overrides (
     data JSONB NOT NULL
 );
 
--- Admin correction of a document's auto-assigned product name, keyed by
--- the document filename (the auto-assigned name itself isn't stable
--- enough to key off -- see app.product_name_overrides).
+-- Admin correction of a document's auto-assigned product name, keyed by filename.
 CREATE TABLE IF NOT EXISTS product_name_overrides (
     document_name TEXT PRIMARY KEY,
     product_name TEXT NOT NULL
@@ -331,9 +266,7 @@ CREATE TABLE IF NOT EXISTS requirements_fields (
     CONSTRAINT requirements_fields_single_row CHECK (id = 1)
 );
 
--- Uploaded document bytes + metadata -- the durable source local
--- data/approved_docs is rebuilt from on cold start (see
--- retriever.rebuild_local_docs_from_postgres).
+-- Uploaded document bytes + metadata; local data/approved_docs is rebuilt from this on cold start.
 CREATE TABLE IF NOT EXISTS documents (
     document_name TEXT PRIMARY KEY,
     content BYTEA NOT NULL,
@@ -346,10 +279,8 @@ _schema_ensured = False
 
 
 def ensure_schema() -> None:
-    """Creates every table if missing. Idempotent; runs at most once per
-    process (subsequent calls are a no-op) since every table statement
-    is already its own CREATE TABLE IF NOT EXISTS -- the process-level
-    guard just avoids a redundant round-trip on every store call."""
+    """Creates every table if missing. Runs at most once per process --
+    a fast-path guard, not required for correctness."""
     global _schema_ensured
     if _schema_ensured:
         return

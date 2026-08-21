@@ -23,6 +23,13 @@ paths run underneath it:
 - **Retrieval-augmented generation (RAG)** -- everything else, answered by retrieving the most
   relevant approved excerpts and generating a grounded response from them.
 
+Answer formatting adapts to the question: a short fact is a few sentences of plain prose, and several
+features/steps become a bullet list. A comparison between two or more products or technologies (e.g.
+"What's the difference between PORTaHY and FIXaHY?") is instructed to format as a markdown table --
+one row per comparison point, one column per thing being compared -- but this is a prompt instruction
+to the model, not code-enforced, so it doesn't always produce a table; a bullet-per-difference answer
+for the same kind of question is a known, observed alternative, not a bug.
+
 Every answer also passes through the **claim guardrail** (see below) before being shown, and each
 answer has Correct / Wrong / Unsafe feedback buttons that feed the Admin accuracy view. A rep can
 also request a plain-language, customer-facing rewrite of any answer, gated by the same guardrail.
@@ -50,8 +57,9 @@ ready to send.
 ### Admin
 Password-protected. Six tabs:
 - **Documents** -- upload new approved documents (auto-indexed and auto-classified into the Product
-  Registry), assign/change a document's type, remove a document (runs in the background so the page
-  isn't blocked), and manually trigger a full index rebuild.
+  Registry), download any approved document's original file, assign/change a document's type, remove
+  a document (runs in the background so the page isn't blocked), and manually trigger a full index
+  rebuild.
 - **Approved Claims** -- edit the small set of admin-typed facts (e.g. standard warranty terms) that
   supplement the approved documents in retrieval.
 - **Restricted Claims** -- edit the policy the claim guardrail checks against: which categories

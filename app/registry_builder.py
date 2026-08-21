@@ -1,17 +1,11 @@
-"""Registry Extraction -- Point 2 of the Product Index architecture.
-Builds data/product_registry.json from the approved catalogues
-automatically. Wired into the same reindex triggers the vector index
-already uses (rag_pipeline.py --reindex, and admin_page.py's rebuild/add/
-remove document actions -- see build_product_registry's callers), so the
-registry and the index are always regenerated from the same document
-sweep and never drift out of sync with each other.
+"""Builds data/product_registry.json from the approved catalogues
+automatically. Wired into the same reindex triggers the vector index uses
+(rag_pipeline.py --reindex, admin_page.py's rebuild/add/remove actions),
+so the registry and the index never drift out of sync.
 
 Extraction rule throughout: never guess. A field that can't be matched
-against a small, bounded vocabulary, or a nomenclature section that
-doesn't match the expected pattern, is reported as "Unknown" -- not
-inferred. See app/concentration.py for why the LEL/ppm/percent conversion
-ratio is treated as a fixed constant, not per-product data.
-"""
+against a small, bounded vocabulary is reported as "Unknown", not
+inferred."""
 from __future__ import annotations
 
 import json
@@ -72,16 +66,11 @@ def _extract_technology(full_text: str) -> str:
 
 
 def _is_selectable_code(code: str) -> bool:
-    """True if a nomenclature code token is a customer-selectable
-    position rather than the product's own fixed brand+model identity.
-    Marked by a trailing "*" (the catalogues' own convention), a slash-
-    separated option list (e.g. "G/P/E"), or a short repeated-letter
-    placeholder (e.g. "RR", "NN", "II", "XX" -- the same shape
-    chunker._is_long_placeholder_blob strips from a title heading, just
-    without that function's 4-char minimum, since a bare 2-letter code
-    like "NN" is still clearly a placeholder here, not a real word).
-    "FIXaHY" and "4220MA" match none of these -- they're always present,
-    never a choice."""
+    """True if a nomenclature code token is a customer-selectable position
+    rather than the product's own fixed brand+model identity. Marked by a
+    trailing "*", a slash-separated option list ("G/P/E"), or a short
+    repeated-letter placeholder ("RR", "NN", "XX"). "FIXaHY" and "4220MA"
+    match none of these -- always present, never a choice."""
     stripped = code.rstrip("*")
     if code.endswith("*"):
         return True
@@ -123,24 +112,17 @@ def _normalize_span_cell(text: str) -> str | None:
 
 
 def _parse_selectable_table(table: Table, codes: list[str] | None = None) -> dict[str, str]:
-    """Parses a "Selectable <X>" table into {code: description}. Tries
-    two ways to figure out which column is which nomenclature code:
+    """Parses a "Selectable <X>" table into {code: description}. Two ways
+    to figure out which column is which nomenclature code: (1) match
+    against the table's own "Span" row (code "2K" matches Span cell
+    "2000 ppm"; "4%" matches "4%" directly) -- there's no single header
+    convention across documents, but codes are derived from the Span
+    value, so this works either way; (2) fall back to a parenthesized
+    code in the header row (the 4220MA style) when there's no Span row.
 
-    1. Match against the table's own "Span" row -- e.g. nomenclature
-       code "2K" (2,000) matches a Span cell of "2000 ppm"; code "4%"
-       matches a Span cell of "4%" directly. There's no single header
-       convention across documents (some label columns "Range 1".."Range
-       5" with no code at all, others spell the code out in parentheses),
-       but the nomenclature codes are derived from the Span value, so
-       matching through that works either way.
-    2. Fall back to a parenthesized code in the header row (the 4220MA
-       style), when there's no Span row or nomenclature `codes` to match
-       against (e.g. Background Gas, Interfaces).
-
-    Any further rows (e.g. Start/Span/Resolution/MDL/Accuracy) are
-    combined into a "Row Label: value" summary per matched code; a
-    single-row table (e.g. Background Gas, where the header row IS the
-    data) just uses its own column text as the value."""
+    Further rows (Start/Span/Resolution/...) combine into a "Row Label:
+    value" summary per matched code; a single-row table just uses its own
+    column text as the value."""
     rows = [[c.text.strip() for c in row.cells] for row in table.rows]
     if not rows or len(rows[0]) < 2:
         return {}
@@ -176,16 +158,12 @@ def _parse_selectable_table(table: Table, codes: list[str] | None = None) -> dic
 
     data_rows = rows[1:]
     # Keep everything through the LAST row that varies across the matched
-    # code columns; drop anything after it entirely. Some documents merge
-    # their whole spec sheet into the same table as the Range columns, so
-    # a trailing row identical across every range (e.g. "Detection
-    # Certainty: 100%") shouldn't get glued onto every code's description
-    # as if it were range-specific. A simple row-by-row "keep only if it
-    # varies" filter is too aggressive, though: a field like MDL can be
-    # identical across a product's own ranges while still being a real
-    # per-range fact, not noise. Truncating at the last varying row keeps
-    # a non-varying row sandwiched between two varying ones, while still
-    # cutting the genuinely irrelevant tail once nothing varies again.
+    # code columns; drop the tail entirely -- some documents merge their
+    # whole spec sheet into the Range table, so a trailing row identical
+    # across every range (e.g. "Detection Certainty: 100%") shouldn't be
+    # glued onto every code's description. A plain "keep only if it
+    # varies" filter is too aggressive: a field like MDL can be identical
+    # across ranges while still being a real per-range fact.
     if len(col_codes) >= 2:
         varies = [
             len({row[i] for i in col_codes if i < len(row) and row[i]}) > 1
@@ -213,18 +191,13 @@ def _parse_selectable_table(table: Table, codes: list[str] | None = None) -> dic
 
 def _parse_freeform_selectable_table(table: Table) -> dict[str, str]:
     """Parses a "Selectable <X>" table into {option name: description}
-    when there's no real short code to key by at all -- unlike
-    _parse_selectable_table (which resolves a genuine ordering-code
-    letter via a Span match or a parenthesized code), this is for a
-    table that documents a real customer choice with NO corresponding
-    position in the product's own order-code suffix (see
-    _extract_additional_selectable_parameters). The column's own header
-    text (e.g. "Range 1", "Air") is the only identifier these tables ever
-    give, so that's what gets used as the key. Some products' tables (e.g.
-    VISION H2 LD's "Selectable Range"/"Selectable Background Gas"/etc)
-    have neither a Span row nor a parenthesized code anywhere, so
-    _parse_selectable_table alone would return {} for them and silently
-    drop those selectable parameters entirely."""
+    when there's no short code to key by -- unlike _parse_selectable_table
+    (which resolves a real ordering-code letter), this is for a table
+    documenting a customer choice with no corresponding order-code
+    position. The column's own header text is the only identifier these
+    tables give, so that's the key. Some products' tables have neither a
+    Span row nor a parenthesized code, so _parse_selectable_table alone
+    would return {} and silently drop those parameters."""
     rows = [[c.text.strip() for c in row.cells] for row in table.rows]
     if not rows or len(rows[0]) < 2:
         return {}
@@ -243,18 +216,13 @@ def _parse_freeform_selectable_table(table: Table) -> dict[str, str]:
             ]
             value = "; ".join(parts) if parts else "Unknown"
         else:
-            # Single-row table (e.g. Background Gas) -- the header row IS
-            # the data, so the option name itself is the complete answer,
-            # same convention _parse_selectable_table's own docstring
-            # describes for this shape.
+            # Single-row table -- the header row IS the data, so the
+            # option name itself is the complete answer.
             value = "Unknown"
-        # Two different columns can share the literal same header text
-        # (e.g. VISION's Compatible Interfaces table has two separate
-        # columns both labeled "0.5-3.5V or RS485", each with its own,
-        # genuinely different interface list underneath) -- keying only
-        # by name would silently let the second overwrite the first,
-        # losing real data. Disambiguate any repeat with its column
-        # position instead of dropping it.
+        # Two columns can share the same header text (e.g. VISION's
+        # Compatible Interfaces has two columns both labeled "0.5-3.5V or
+        # RS485" with different data underneath) -- disambiguate with the
+        # column position rather than letting the second overwrite the first.
         key = name if name not in values else f"{name} ({col_idx})"
         values[key] = value
     return values
@@ -263,27 +231,18 @@ def _parse_freeform_selectable_table(table: Table) -> dict[str, str]:
 def _extract_additional_selectable_parameters(
     doc: Document, resolved_labels: list[str]
 ) -> dict[str, dict[str, str]]:
-    """Every "Selectable <X>" table in the document that ISN'T already
-    captured as a real ordering-code segment (see _extract_nomenclature)
-    -- e.g. VISION H2 LD's ordering code ("VISION H2 LD XX*") only has
-    one selectable position (Output Signal), but the document separately
-    documents Range, Background Gas, Compatible Interfaces, and
-    Connector Option as real selectable specs too, each with its own
-    "Selectable <X>" table -- these have no code position at all, yet
-    are still real choices a customer makes and a rep needs to record.
-    Without this, they'd be silently dropped, since the ordering-code
-    nomenclature path only looks at a "Selectable <X>" table when a
-    matching code segment already led it there. resolved_labels are the
-    nomenclature labels that DID
-    already consume their own table via _find_selectable_table, so they
-    aren't re-added here as a duplicate."""
+    """Every "Selectable <X>" table not already captured as a real
+    ordering-code segment -- e.g. VISION H2 LD's ordering code has one
+    selectable position (Output Signal), but the document separately
+    documents Range, Background Gas, and other real selectable specs with
+    no code position at all. Without this they'd be silently dropped,
+    since the nomenclature path only looks at a table when a matching
+    code segment led it there. resolved_labels are the nomenclature
+    labels that already consumed their own table, so they aren't
+    re-added here as a duplicate."""
     # Identity by the underlying XML element (table._tbl), not the
-    # python-docx Table wrapper itself: doc.tables constructs a fresh
-    # Table wrapper object on every access, even for the exact same
-    # table, so id(table) would never match across the separate
-    # _find_selectable_table() call here versus the for-loop below. The
-    # wrapped lxml element is the same object every time, regardless of
-    # how many times .tables is accessed.
+    # python-docx Table wrapper -- doc.tables constructs a fresh wrapper
+    # on every access, so id(table) would never match across calls.
     claimed_tables = {
         id(t._tbl) for label in resolved_labels if (t := _find_selectable_table(doc, label)) is not None
     }
@@ -307,12 +266,10 @@ def _extract_additional_selectable_parameters(
 
 def _find_selectable_table(doc: Document, label: str) -> Table | None:
     """Finds a "Selectable <X>" table elsewhere in the document matching a
-    nomenclature segment's own label (e.g. label "Range" -> the table
-    headed "Selectable range"). Some products (e.g. FIXaHY-4220MA's Range
-    and Background segments) have real, detailed per-code tables sitting
-    elsewhere in the document, not adjacent to the nomenclature section --
-    far richer than the crude "01 to 05" placeholder text sitting inline
-    in the nomenclature table itself."""
+    nomenclature segment's label (e.g. "Range" -> "Selectable range").
+    Some products have real, detailed per-code tables sitting elsewhere in
+    the document, far richer than the crude placeholder text inline in
+    the nomenclature table itself."""
     # Trailing "s" stripped before comparing: some products' table headers
     # are plural ("Selectable Ranges") while others are singular
     # ("Selectable Range"), so an exact-word intersection would miss one
@@ -374,12 +331,9 @@ def _extract_nomenclature(doc: Document) -> dict[str, Any]:
                 label_line_idx = j
             elif value_row is None:
                 # A third tab-separated line right after the label row,
-                # giving each selectable segment's value/range inline
-                # (e.g. FIXaHY-4220MA: "01 to 05\t04: LM6 Die Cast\t01 to
-                # 07\t01 to 50") -- a different decode shape than the
-                # "V - meaning" bullet list some documents use instead;
-                # some catalogues have no bullet list at all and only
-                # decode through this inline row.
+                # giving each selectable segment's value/range inline --
+                # a different decode shape than the "V - meaning" bullet
+                # list some documents use instead of, or in addition to.
                 value_row = item.text.strip()
                 break
         elif isinstance(item, Table) and template_table is None:
@@ -426,19 +380,16 @@ def _extract_nomenclature(doc: Document) -> dict[str, Any]:
             aliases.append(f"{base} {code_value}".strip())
 
         # Decode every customer-selectable segment, not just the last --
-        # e.g. FIXaHY-4220MA's Range/Enclosure/Background/Industry segments
-        # are all selectable. "FIXaHY"/"4220MA" are the fixed brand+model
-        # identity (never a customer choice), correctly excluded by
-        # _is_selectable_code.
+        # e.g. FIXaHY-4220MA has several selectable segments. Fixed
+        # brand+model identity codes are excluded by _is_selectable_code.
         selectable = [c for c in codes if _is_selectable_code(c)]
 
         inline_values: dict[str, str] = {}
         if value_row:
             row_values = [v.strip() for v in value_row.split("\t") if v.strip()]
-            # Non-empty fields align with the TRAILING N selectable codes
-            # -- the same convention the codes/labels rows themselves use
-            # (a leading gap for the fixed identity segments that have no
-            # value to show here).
+            # Non-empty fields align with the TRAILING N selectable codes,
+            # same convention the codes/labels rows use (a leading gap for
+            # fixed identity segments with no value to show).
             if row_values and len(row_values) <= len(selectable):
                 inline_values = dict(zip(selectable[-len(row_values):], row_values))
 
@@ -455,17 +406,11 @@ def _extract_nomenclature(doc: Document) -> dict[str, Any]:
             )
 
             if table_values:
-                # A dedicated "Selectable <X>" table elsewhere in the
-                # document -- real, complete per-code data (e.g. actual
-                # gas names, or Start/Span/Resolution/MDL/Accuracy all
-                # together), checked first since it's far richer than
-                # either the bullet list or the crude inline value-row
-                # text, which typically decode to only a bare range and
-                # miss fields like Resolution/MDL/Accuracy documented
-                # separately. When the table can't be reliably matched to
-                # real codes (e.g. a table has neither a Span row nor
-                # parenthesized codes), it comes back empty and this falls
-                # through to the bullet/inline paths below.
+                # A dedicated "Selectable <X>" table -- checked first
+                # since it's far richer than the bullet list or inline
+                # value-row text, which typically decode to only a bare
+                # range. Falls through to those paths below when the
+                # table can't be reliably matched to real codes.
                 values = table_values
             elif code == codes[-1] and value_decode:
                 if label.strip().lower() in CONCENTRATION_RANGE_LABELS:
@@ -492,25 +437,16 @@ def _extract_nomenclature(doc: Document) -> dict[str, Any]:
 
             if values:
                 segments[code] = {"label": label, "values": values}
-                # Tracked regardless of which path resolved it (table,
-                # bullet-list, inline value row, or slash-list) -- any of
-                # them means this label is already fully represented in
-                # `nomenclature`, so _extract_additional_selectable_
-                # parameters must not also re-capture its "Selectable
-                # <X>" table as if it were a second, separate parameter.
+                # Tracked regardless of which path resolved it, so
+                # _extract_additional_selectable_parameters doesn't
+                # re-capture the same label's table as a second parameter.
                 table_resolved_labels.append(label)
 
-        # A code position left as a bare label string (never converted
-        # above) either has no real value at all -- a pure identity token
-        # like "FIXaHY" -> "Series Name" -- or is a fixed, non-selectable
-        # spec whose actual value sits in a plain sentence elsewhere in the
-        # document, not in the nomenclature table (e.g. FIXaHY-4220MA's
-        # model number has no "*"/placeholder, so it's correctly excluded
-        # from `selectable`, but the document still states its fixed value
-        # in a plain sentence). Without this, the rep would see no
-        # information at all instead of a real, quotable fixed spec.
-        # Searching by label, not by code, so this applies to any product
-        # with the same shape.
+        # A code position left as a bare label string is either a pure
+        # identity token ("FIXaHY" -> "Series Name") or a fixed spec whose
+        # value sits in a plain sentence elsewhere, not the nomenclature
+        # table. Without this the rep would see no information instead of
+        # a quotable fixed spec.
         for code, label in list(segments.items()):
             if not isinstance(label, str):
                 continue
@@ -522,12 +458,10 @@ def _extract_nomenclature(doc: Document) -> dict[str, Any]:
 
 
 def _is_eligible_catalogue(path: Path) -> bool:
-    """Only .docx product catalogues. PDF text extraction is too lossy
-    for this kind of structural extraction, and reference documents
-    (historical sales, competitor comparison) aren't individual product
-    catalogues at all -- reuses the same exclusion rule retriever.py
-    already relies on, so the registry and the vector index agree on
-    what counts as a real product document."""
+    """Only .docx product catalogues -- PDF text extraction is too lossy
+    for this, and reference documents aren't real product catalogues.
+    Reuses the same exclusion rule retriever.py relies on, so the
+    registry and the vector index agree on what counts."""
     from app.retriever import _is_single_product_document
 
     return path.suffix.lower() == ".docx" and _is_single_product_document(path.name)
@@ -554,24 +488,17 @@ def build_product_registry(docs_dir: str | Path = "data/approved_docs") -> dict[
     for path, loaded_doc in zip(paths, loaded_docs):
         product_name = product_names.get(path.name, path.stem)
         # full_text comes from the loader's own text, not a fresh raw
-        # python-docx paragraph walk: some catalogues declare their own
-        # category (e.g. "MEMS Fixed Hydrogen Leak Detector") inside a
-        # floating text box, which plain doc.paragraphs never sees at all,
-        # leaving product_type/install_type as "Unknown". The loader
-        # already walks into text boxes (see document_loader.
-        # _iter_textbox_paragraph_elements) -- reused here rather than
-        # re-solving the same problem twice.
+        # python-docx paragraph walk -- some catalogues declare their
+        # category inside a floating text box, which plain doc.paragraphs
+        # never sees. The loader already walks into text boxes, so this
+        # reuses that instead of re-solving the same problem twice.
         full_text = loaded_doc["text"]
         doc = Document(path)  # still needed: _extract_nomenclature wants the raw docx structure
         nomenclature = _extract_nomenclature(doc)
         all_aliases = {product_name} | {a for a in nomenclature["aliases"] if a}
-        # Real selectable specs documented with their own "Selectable <X>"
-        # table but no position in the product's own ordering-code suffix
-        # at all (e.g. VISION H2 LD's Range/Background Gas/Compatible
-        # Interfaces/Connector Option) -- see
-        # _extract_additional_selectable_parameters for why these need a
-        # separate extraction path from the ordering-code nomenclature
-        # above.
+        # Selectable specs with their own "Selectable <X>" table but no
+        # position in the ordering-code suffix (see
+        # _extract_additional_selectable_parameters).
         additional_selectable_parameters = _extract_additional_selectable_parameters(
             doc, nomenclature["table_resolved_labels"]
         )
@@ -600,12 +527,10 @@ def rebuild_product_registry(
     docs_dir: str | Path = "data/approved_docs", path: str | Path = REGISTRY_PATH
 ) -> int:
     """Build and save in one call -- what the reindex triggers actually
-    call. Full regeneration every time, not an incremental update: the
-    registry is cheap to rebuild from scratch (a handful of documents,
-    not thousands), and always rebuilding from the current state of
-    data/approved_docs is what keeps it from ever drifting out of sync
-    with what's actually approved, the same way the vector index itself
-    is fully rebuilt rather than patched."""
+    call. Full regeneration every time, not incremental: the registry is
+    cheap to rebuild from scratch, and always rebuilding from the current
+    approved_docs is what keeps it from drifting out of sync, same as the
+    vector index."""
     registry = build_product_registry(docs_dir)
     save_product_registry(registry, path)
     return len(registry["products"])

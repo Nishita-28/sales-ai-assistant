@@ -3,14 +3,13 @@ topic: a category, its trigger keywords, whether matches are always
 unsupported, and a note shown in the Admin UI.
 
 Backed by Postgres (Neon) when app.db.is_postgres_enabled() -- this is
-what the assistant actually enforces on every answer (see
-app.claim_checker.check_restricted_claims), so an edit here silently
-reverting on the next Streamlit Cloud redeploy would mean a
-certification/pricing/safety guardrail an admin just added quietly
-stops being enforced. Falls back to the original local YAML file when
-DATABASE_URL isn't set. The `path` parameter is only meaningful in the
-local-file branch -- kept in both function signatures so every existing
-caller works unchanged regardless of which backend is active.
+what's actually enforced on every answer (app.claim_checker.
+check_restricted_claims), so an edit reverting silently on the next
+Streamlit Cloud redeploy would mean a safety guardrail an admin just
+added quietly stops being enforced. Falls back to the local YAML file
+when DATABASE_URL isn't set. The `path` parameter is only meaningful in
+the local-file branch -- kept in both signatures so every caller works
+unchanged regardless of backend.
 """
 from __future__ import annotations
 

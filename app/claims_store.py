@@ -1,19 +1,15 @@
 """Reads and writes the Approved Claims list -- a header paragraph plus a
 flat bullet list -- so the Admin UI can list/add/edit/delete claims
-without hand-editing markdown. Indexed into retrieval (see
-app.retriever.load_and_chunk_approved_docs), so this content can inform
-an answer -- but it's not enforced policy the way restricted_claims.yaml
-is: it can't, on its own, satisfy a restricted-category claim (see
-app.claim_checker.guardrail_source_text).
+without hand-editing markdown. Indexed into retrieval, so this content
+can inform an answer, but it's not enforced policy the way
+restricted_claims.yaml is: it can't, on its own, satisfy a
+restricted-category claim (see app.claim_checker.guardrail_source_text).
 
-Backed by Postgres (Neon) when app.db.is_postgres_enabled() -- Streamlit
-Community Cloud's filesystem is ephemeral, so a claim saved to the local
-approved_claims.md file would silently vanish on the next redeploy or
-cold start. Falls back to the original local-file behavior when
-DATABASE_URL isn't set, so local dev/tests never need a live connection.
-The `path` parameter is only meaningful in the local-file branch -- kept
-in both function signatures so every existing caller (admin_page.py,
-retriever.py) works unchanged regardless of which backend is active."""
+Backed by Postgres (Neon) when app.db.is_postgres_enabled() -- otherwise
+a claim saved to local approved_claims.md would vanish on the next
+Streamlit Cloud redeploy. The `path` parameter is only meaningful in the
+local-file branch -- kept in both function signatures so every existing
+caller works unchanged regardless of which backend is active."""
 from __future__ import annotations
 
 from pathlib import Path

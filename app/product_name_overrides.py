@@ -1,18 +1,14 @@
 """Admin correction of a document's auto-assigned product name (see
 app.chunker.assign_product_name) -- for when the heading the auto-namer
-picked isn't actually the right product name.
+picked isn't the right product name.
 
-Keyed by document filename, not by the auto-assigned name itself: the
-auto-assigned name is recomputed on every rebuild and can shift if other
-documents in the batch change, so the filename is the only stable identity
-to hang a correction off. Checked as the final step of name assignment
-(see chunker._assign_product_names and retriever.add_document_to_index),
-so an admin's correction survives every future reindex instead of being
-silently recomputed away -- the same pattern as app.product_field_overrides,
-applied to the name itself rather than to a product's selectable fields.
+Keyed by document filename, not the auto-assigned name itself: the
+auto-assigned name is recomputed on every rebuild and can shift, so the
+filename is the only stable identity to hang a correction off. Checked
+as the final step of name assignment, so an admin's correction survives
+every future reindex instead of being silently recomputed away.
 
-Backed by Postgres (Neon) when app.db.is_postgres_enabled() -- see
-app.deals_store's module docstring for why."""
+Backed by Postgres (Neon) when app.db.is_postgres_enabled()."""
 from __future__ import annotations
 
 import json

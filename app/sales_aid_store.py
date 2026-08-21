@@ -1,17 +1,12 @@
 """Stores generated Sales Aids, one row per generation rather than a
 single "latest" slot -- unlike Discovery's recommendation (a single
-evolving verdict, see deals_store.save_recommendation), a rep can
-reasonably generate several distinct Sales Aids for the same deal over
-time (different competitors, different framing at different points in
-the sales cycle), and losing that history would throw away real,
-reusable material. Mirrors requirements_store.py's shape for the same
-reason requirements keeps full history too.
+evolving verdict), a rep can reasonably generate several distinct Sales
+Aids for the same deal over time, and losing that history would throw
+away reusable material.
 
 Includes the deal_id read side (list_sales_aids_for_deal) so a deal's
-linked Sales Aids are queryable without raw SQL.
-
-Backed by Postgres (Neon) when app.db.is_postgres_enabled() -- see
-app.deals_store's module docstring for why.
+linked Sales Aids are queryable without raw SQL. Backed by Postgres
+(Neon) when app.db.is_postgres_enabled().
 """
 from __future__ import annotations
 

@@ -69,14 +69,11 @@ class ResponseGeneratorError(RuntimeError):
 
 @dataclass
 class GeneratedAnswer:
-    """The answer returned to the UI, plus its sources, confidence, and risk
-    category. Customer-facing wording is NOT generated here -- it's a
-    separate, on-demand call (see generate_customer_wording()) made only
-    when a rep actually asks for it, since most answers never need one and
-    generating it eagerly on every question roughly doubled completion
-    time for no benefit. customer_wording_blocked tells the UI upfront
-    whether that option should even be offered, without needing an LLM
-    call to find out."""
+    """The answer returned to the UI, plus sources, confidence, and risk
+    category. Customer-facing wording is generated separately, on demand
+    (generate_customer_wording()) -- eager generation roughly doubled
+    completion time for no benefit. customer_wording_blocked tells the UI
+    upfront whether to offer that option, with no extra LLM call."""
 
     answer: str
     sources: list[tuple[str, str, str]]
@@ -143,10 +140,9 @@ def _format_source(metadata: dict[str, Any]) -> tuple[str, str]:
 
 
 def _dedupe_sources(matches: list[dict[str, Any]]) -> list[tuple[str, str, str]]:
-    """A (document, section, extracted text) triple can appear on more than
-    one retrieved chunk; list it once, in first-seen order. The extracted
-    text is the exact chunk wording retrieved from the document -- shown in
-    the UI so a rep can see what grounded the answer, not just its source."""
+    """Dedupes (document, section, extracted text) triples, first-seen
+    order. The extracted text is the exact chunk wording, shown in the UI
+    so a rep can see what grounded the answer, not just its source."""
     seen: set[tuple[str, str, str]] = set()
     sources: list[tuple[str, str, str]] = []
     for match in matches:
@@ -221,11 +217,9 @@ def _get_azure_openai_chat_client():
 
 
 def warm_up() -> None:
-    """Eagerly loads the system prompt and makes a throwaway chat completion
-    call, so the network connection is already warm before the first
-    question -- constructing the client alone doesn't touch the slow part
-    (the TLS handshake on the first real request). max_tokens=1 keeps this
-    as cheap as a chat completion call can be."""
+    """Loads the system prompt and makes a throwaway chat call so the
+    connection is warm before the first real question. max_tokens=1 keeps
+    it as cheap as a chat completion can be."""
     _load_system_prompt()
     if LLM_PROVIDER in ("openai", "azure_openai"):
         _call_llm("Hi", "Hi", max_tokens=1)
@@ -273,12 +267,10 @@ def _call_llm(system_prompt: str, user_message: str, max_tokens: Optional[int] =
 
 
 def _call_llm_stream_raw(system_prompt: str, user_message: str) -> Iterator[str]:
-    """Yields text deltas exactly as the provider sends them -- for OpenAI/
-    Azure this is roughly token-by-token, which redraws the UI so often on
-    a short answer that it reads as a flicker rather than a smooth
-    "typing" effect. _call_llm_stream() wraps this with batching before
-    handing it to callers; nothing outside this module should call the
-    raw version directly."""
+    """Yields text deltas as the provider sends them -- roughly
+    token-by-token for OpenAI/Azure, which flickers rather than reading
+    as smooth typing. _call_llm_stream() wraps this with batching; nothing
+    outside this module should call the raw version."""
     if LLM_PROVIDER == "offline_mock":
         # Yields a few words at a time so the offline/dev path exercises
         # the same streaming UI code as a real provider.
@@ -341,13 +333,11 @@ def _batch_text_stream(chunks: Iterator[str]) -> Iterator[str]:
 
 
 def _full_catalog_coverage_note(matches: list[dict[str, Any]]) -> Optional[str]:
-    """When retrieval was deliberately balanced across every currently
-    approved product (see dispatcher.py's "no specific product named"
-    fallback -- it forces exactly this), tells the model explicitly which
-    products were checked. Without this, a product with genuinely no
-    relevant content (e.g. a fixed, wall-powered product with no
-    battery/charging concept) reads as if it was never considered at all,
-    rather than as a deliberate check that correctly found nothing."""
+    """When retrieval was balanced across every approved product
+    (dispatcher.py's "no specific product named" fallback), tells the
+    model explicitly which products were checked -- otherwise a product
+    with genuinely no relevant content reads as never considered, not as
+    a deliberate check that found nothing."""
     try:
         from app.product_index import load_product_index
         products, _ = load_product_index()
@@ -370,10 +360,8 @@ def _full_catalog_coverage_note(matches: list[dict[str, Any]]) -> Optional[str]:
 
 def _call_llm_stream(system_prompt: str, user_message: str) -> Iterator[str]:
     """Streaming counterpart to _call_llm(): yields text in smooth,
-    batched pieces as the LLM generates them, instead of returning the
-    full reply only once it's complete. Nothing in this generator's body
-    runs until it's first iterated (standard Python generator semantics),
-    so callers can wrap the call in a try/except around iteration to
+    batched pieces as the LLM generates them. As a generator, nothing runs
+    until first iterated, so callers can try/except around iteration to
     catch request errors the same way as a non-streaming call."""
     yield from _batch_text_stream(_call_llm_stream_raw(system_prompt, user_message))
 
@@ -396,33 +384,23 @@ def stream_answer(
     intent: Intent = UNKNOWN_INTENT,
     skip_ambiguity_check: bool = False,
 ) -> Iterator[str]:
-    """Yields the internal answer's text in chunks as the LLM generates it
-    -- feed this straight to st.write_stream() (or similar) for live
-    display. Yields NO_SOURCE_MESSAGE once, without calling the LLM at
-    all, if retrieval found nothing usable, or AMBIGUOUS_PRODUCT_MESSAGE
-    once, also without calling the LLM, if the question refers to "this"/
-    "it"/"the sensor" without naming a real product -- a deterministic
-    check, not a prompt instruction, since the model tends to invent a
-    product to answer about rather than asking which one was meant
-    (retrieval finding topically-similar chunks isn't the same as the
-    user having named a product), or NO_SOURCE_MESSAGE again
-    if the question is self-referential ("our"/"we"/"us"/"the company")
-    but every retrieved match came from a reference document rather than
-    an actual product catalogue -- retrieving topically-related
-    competitor content isn't the same as having this company's own
-    answer. Once the caller has the full text (e.g. st.write_stream()'s
-    return value), pass it to
-    finalize_answer() to get sources, confidence, risk, and whether
-    customer-facing wording is available -- that can't be known until the
-    full answer exists.
+    """Yields the answer's text in chunks as the LLM generates it -- feed
+    straight to st.write_stream(). Without calling the LLM: yields
+    NO_SOURCE_MESSAGE if retrieval found nothing usable; yields
+    AMBIGUOUS_PRODUCT_MESSAGE if the question refers to "this"/"it"/"the
+    sensor" without naming a real product (a deterministic check, since
+    the model tends to invent a product rather than ask which was meant);
+    yields NO_SOURCE_MESSAGE if the question is self-referential
+    ("our"/"we") but every match came from a reference document, not an
+    actual product catalogue. Once the caller has the full text, pass it
+    to finalize_answer() for sources, confidence, risk, and customer-wording
+    availability -- none of which can be known until the answer exists.
 
-    skip_ambiguity_check=True skips is_ambiguous_product_reference() --
-    for a caller (rag_pipeline.py) whose dispatcher already resolved this
-    question's product reference deterministically (kind="scoped"). That
-    resolution can use information (e.g. technology-alias matching) this
-    function's own, independent ambiguity check doesn't have, so without
-    skipping it a correctly-scoped answer can still get discarded in
-    favor of a generic "Could you specify which product?" message."""
+    skip_ambiguity_check=True skips is_ambiguous_product_reference() for a
+    caller (rag_pipeline.py) whose dispatcher already resolved the product
+    reference with information this function's own check doesn't have --
+    without it, a correctly-scoped answer could get discarded for a
+    generic "Could you specify which product?" message."""
     matches = retrieval.get("matches") or []
     retrieval_confidence = retrieval.get("confidence", "none")
 
@@ -445,12 +423,9 @@ def stream_answer(
     if coverage_note:
         user_message += "\n\n" + coverage_note
 
-    # Hydrogen concentration unit conversion is arithmetic, not something to
-    # trust the model with: asked to convert 15,000 ppm to %LEL, a model can
-    # confidently compute 6% / 150% LEL instead of the correct 1.5% / 37.5%
-    # LEL. The conversion ratio (100% LEL = 4% H2 v/v = 40,000 ppm) is
-    # computed here in code and handed to the model as a fact to state, not
-    # a calculation to perform.
+    # Concentration unit conversion is arithmetic, not something to trust
+    # the model with (it can confidently miscompute ppm-to-%LEL) -- the
+    # ratio is computed here and handed to the model as a fact to state.
     conversion = detect_conversion_request(question)
     if conversion is not None:
         concentration, target_unit = conversion
@@ -468,13 +443,11 @@ _EMAIL_RE = re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+")
 
 
 def _contains_ungrounded_email(answer_text: str, source_text: str) -> bool:
-    """True if the answer states an email address that doesn't literally
-    appear anywhere in the retrieved source text. Since MNST is a real
-    company, the model can recall genuine-looking contact details from
-    its own general knowledge instead of the given context -- exactly the
-    kind of claim "answer only from the approved excerpts" is meant to
-    rule out but can't reliably enforce through the prompt alone, so this
-    is a deterministic check on the finished answer instead."""
+    """True if the answer states an email address not literally present in
+    the retrieved source text -- since MNST is a real company, the model
+    can recall a genuine-looking contact detail from general knowledge
+    instead of the given context. A deterministic backstop the prompt
+    alone can't reliably enforce."""
     for email in _EMAIL_RE.findall(answer_text):
         if email.lower() not in source_text.lower():
             return True
@@ -495,15 +468,9 @@ def finalize_answer(question: str, retrieval: dict[str, Any], answer_text: str) 
     if _contains_ungrounded_email(answer_text, source_text):
         answer_text = NO_SOURCE_MESSAGE
 
-    # A "not documented" or "please clarify" answer showing as high
-    # confidence reads as a contradiction to a rep -- confidence below
-    # comes from retrieval similarity, which can be high even when the
-    # model correctly declines to answer (the fact asked about isn't in
-    # the topically-close excerpts it found) or a product reference is
-    # ambiguous (the excerpts are a strong topical match, just not
-    # confirmation of which product was meant). Force it to Low for
-    # either fixed non-answer, so the badge reflects what the rep
-    # actually got: nothing.
+    # Force Low for either fixed non-answer -- retrieval similarity can be
+    # high even when the model correctly declines to answer, which would
+    # otherwise show as a contradictory "High confidence: not documented".
     if answer_text in (NO_SOURCE_MESSAGE, AMBIGUOUS_PRODUCT_MESSAGE):
         confidence = "Low"
     else:

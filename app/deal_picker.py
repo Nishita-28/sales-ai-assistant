@@ -25,28 +25,16 @@ def deal_label(deal) -> str:
 def render_deal_picker(key_prefix: str) -> tuple[int | None, str, str, str]:
     """Select an existing deal, or start a new one. Returns (deal_id,
     customer_name, company, use_case) -- deal_id is None while "+ New deal"
-    is selected and hasn't been started yet.
+    is selected and hasn't been started yet. Deal creation is fully owned
+    here, inside one st.form.
 
-    Starting a new deal is a single atomic step (Customer Name + Company +
-    "Start New Deal", all inside one st.form), so the fields commit
-    together with the submit button rather than racing a separate page
-    action. Deal creation is fully owned here; a caller never creates a
-    deal itself from render_deal_picker()'s return values while deal_id
-    is None.
-
-    Uses the shared, page-agnostic st.session_state.active_deal_id (not
-    prefixed) as the default selection, so a deal chosen on one page is
-    already selected when a rep navigates to another. key_prefix only
-    namespaces this picker's own widget keys.
-
-    Selection is by deal id (via format_func), not by the display label,
-    since two deals for the same customer/company can produce an
-    identical label.
-
-    The selectbox's widget key is suffixed with the active deal id so
-    switching deals always mounts a fresh widget instance -- a fixed key
-    isn't reliable enough for BaseWeb Select to resync its displayed
-    value across that transition."""
+    Uses the shared, page-agnostic st.session_state.active_deal_id as the
+    default selection, so a deal chosen on one page is already selected on
+    another; key_prefix only namespaces this picker's own widget keys.
+    Selection is by deal id, not display label, since two deals for the
+    same customer/company can produce an identical label. The widget key
+    is suffixed with the active deal id since a fixed key isn't reliable
+    enough for BaseWeb Select to resync its displayed value on switch."""
     deals = list_deals()
     deal_by_id = {d["id"]: d for d in deals}
     options: list[int | None] = [None] + list(deal_by_id.keys())

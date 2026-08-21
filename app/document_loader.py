@@ -28,14 +28,9 @@ def _clean_text(text: str) -> str:
     return text.strip()
 
 
-# ---------------------------------------------------------------------------
-# OCR -- text baked into images (scanned PDF pages, screenshots/photos
-# embedded in a document, or a standalone image file). Kept as one shared
-# helper so every extractor that needs it (PDF page fallback, embedded
-# images in DOCX/PPTX, standalone image files) goes through the same
-# engine and the same cached instance -- initializing RapidOCR loads its
-# models, which is too slow to repeat per call.
-# ---------------------------------------------------------------------------
+# OCR for text baked into images (scanned PDF pages, embedded images,
+# standalone image files) -- one shared, cached engine, since initializing
+# RapidOCR loads its models and is too slow to repeat per call.
 
 # Below this many characters, a PDF page's native text layer is treated as
 # absent (scanned page) rather than just a short page of real text.
@@ -54,13 +49,11 @@ def _get_ocr_engine():
 
 
 def _run_ocr(image_bytes: bytes) -> str:
-    """Runs OCR on raw image bytes and returns the recognized text, lines
-    joined with newlines in reading order. Returns "" if nothing is
-    recognized (e.g. a decorative image with no text), or if the bytes
-    aren't a raster format Pillow can decode at all (embedded vector
-    graphics like SVG/WMF/EMF are common in real DOCX/PPTX files and
-    aren't something OCR applies to) -- either case is a normal, expected
-    outcome for some embedded images, not an error."""
+    """Runs OCR on raw image bytes, lines joined by newline in reading
+    order. Returns "" if nothing is recognized, or if the bytes aren't a
+    raster format Pillow can decode (embedded vector graphics like
+    SVG/WMF/EMF are common and not something OCR applies to) -- both are
+    normal outcomes, not errors."""
     import io
 
     import numpy as np
@@ -323,22 +316,12 @@ def _detect_table_style(grid: list[list[str]], is_bold_fn: IsBoldFn) -> str:
         if len(grid) == 1:
             return "keyvalue"
 
-        # A vertically-merged cell in column 0 (one shared label next to
-        # several distinct per-row notes/options) has no merge information
-        # by the time it reaches this grid -- resolve_table_grid() reads
-        # python-docx cells directly, and python-docx returns the same
-        # merged cell's text for every row it spans rather than exposing
-        # the merge, so every constituent row looks like it has its own,
-        # identical column-0 value; reading that as a real header row would
-        # make the header itself double as a second, near-duplicate data row.
-        #
-        # Only trusted for a genuinely long, sentence-like column-0 value
-        # (a real merged label reads like a description, not an
-        # identifier) -- a short repeated value (a brand name, a code) is
-        # not evidence of a merge at all, it's just a legitimate repeated
-        # key across real, distinct rows (e.g. three rows that all
-        # legitimately start with "MNST"). 40 chars comfortably separates a
-        # short identifier from a multi-clause descriptive sentence.
+        # A vertically-merged column-0 cell has no merge info by the time
+        # it reaches this grid -- python-docx returns the same text for
+        # every row a merged cell spans, so it looks like a repeated
+        # column-0 header value. Only trusted as a real merge for a long,
+        # sentence-like value (40+ chars) -- a short repeated value (a
+        # brand name, a code) is a legitimate repeated key, not a merge.
         _MIN_MERGED_LABEL_LENGTH = 40
         col0_values = [row[0] for row in grid if row]
         merged_first_column = (
@@ -435,15 +418,11 @@ def check_table_coverage(block: dict[str, Any]) -> list[str]:
     return sorted(missing)
 
 
-# A real column/segment header is a short label -- a few words at most. A
-# name this long is a strong signal the multi-row-header detector
-# (_detect_header_row_count / _row_extends_header) merged unrelated body
-# text into what it thinks is a header row, rather than that literal text
-# actually dropping (check_table_coverage passes cleanly in this case --
-# every character is still present, just organized wrong). Not proof the
-# header is wrong -- a table could legitimately have a long name -- but
-# cheap, high-signal, and worth flagging for review rather than shipping
-# silently.
+# A real column/segment header is a short label. A name this long is a
+# strong signal the multi-row-header detector merged unrelated body text
+# into a header row (check_table_coverage passes cleanly in this case --
+# nothing is missing, just organized wrong). Not proof, but cheap and
+# high-signal enough to flag for review.
 _MAX_REASONABLE_COLUMN_NAME_LENGTH = 100
 
 
@@ -607,13 +586,10 @@ def extract_docx_blocks(file_path: str | Path) -> list[dict[str, Any]]:
             table_index += 1
             block_index += 1
 
-    # Embedded pictures (screenshots, scanned certificates, nameplate
-    # photos) aren't part of the paragraph/table walk above at all -- python-
-    # docx exposes them only via the part relationships, not as inline text.
-    # This is a flat pass over every embedded image in the file, not
-    # positioned relative to the section it visually appears under -- good
-    # enough to make the text searchable/retrievable, not a layout-accurate
-    # placement.
+    # Embedded pictures aren't part of the paragraph/table walk above --
+    # python-docx exposes them only via part relationships. A flat pass
+    # over every image, not positioned relative to its visual section --
+    # good enough to be searchable, not layout-accurate.
     for rel in document.part.rels.values():
         if "image" not in rel.reltype:
             continue
@@ -871,40 +847,30 @@ def extract_csv_blocks(file_path: str | Path) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# XLSX title/table-region detection -- a leading row above a real table
-# (a report title, a subtitle, a section label) is common in real-world
-# spreadsheets. Left undetected, it gets misread as the header row itself,
-# corrupting every column name below it.
+# XLSX title/table-region detection -- a leading title/subtitle row above
+# a real table is common in real spreadsheets and, left undetected, gets
+# misread as the header row, corrupting every column name below it.
 #
-# Deliberately not a "sparse row = title" rule: a row with exactly one
-# populated cell can just as easily be real data (e.g. a narrow table
-# whose first column repeats the same category value down every row).
-# Two independent signals must BOTH agree before a row is reclassified
-# out of the table body:
+# Not a "sparse row = title" rule: a row with one populated cell can be
+# real data too (e.g. a narrow table repeating one category value down
+# every row). Two independent signals must BOTH agree before a row is
+# reclassified out of the table body: (1) it populates at most
+# _MAX_TITLE_POPULATED_CORE_COLUMNS of the table's "core columns" (an
+# absolute count, not a percentage, so it generalizes across widths), and
+# (2) none of its populated core-column values recur anywhere else in the
+# table body (a title is a one-off; real data recurs).
 #
-# 1. Coverage gap against the table's own "core columns" (the columns
-#    populated in every row of a consistent, regular block) -- a
-#    candidate row must populate at most _MAX_TITLE_POPULATED_CORE_
-#    COLUMNS of them. An absolute count, not a percentage, since a
-#    percentage threshold doesn't generalize across table widths.
-# 2. Non-recurrence -- none of the candidate row's populated core-column
-#    values may reappear in that same column anywhere in the table body.
-#    A title is a one-off label; real row data recurs.
-#
-# A row that doesn't clearly satisfy both stays part of the table,
-# untouched. This can misjudge a real title as ordinary data, but it can
-# never misjudge real data as a title and discard it -- the failure mode
-# that actually matters for a knowledge base an AI answers questions from.
+# A row that doesn't clearly satisfy both stays part of the table. This
+# can misjudge a real title as data, but never misjudges real data as a
+# title and discards it -- the failure mode that actually matters here.
 # ---------------------------------------------------------------------------
 
-# How many consecutive rows must share a consistent set of populated
-# columns before that's trusted as "a real table starts here" rather than
-# coincidence.
+# Consecutive rows that must share a consistent populated-column set
+# before that's trusted as "a real table starts here", not coincidence.
 _TABLE_REGION_WINDOW = 3
 
-# A real table's core columns are the ones populated in every row of that
-# consistent block; a candidate leading row must leave at least half of
-# them empty to even be considered for title reclassification.
+# A candidate leading row must leave at least half of the table's core
+# columns empty to be considered for title reclassification.
 _TABLE_REGION_MIN_CORE_FRACTION = 0.5
 
 _MAX_TITLE_POPULATED_CORE_COLUMNS = 1
@@ -916,16 +882,14 @@ def _find_table_region_start(
     min_core_frac: float = _TABLE_REGION_MIN_CORE_FRACTION,
 ) -> tuple[int, set[int], bool]:
     """Scans forward for the first index where `window` consecutive rows
-    share a consistent, substantial set of populated columns -- trusted
-    as where a real table begins. Returns (start_index, core_columns,
-    found); found=False means no such consistent region was located, and
-    the other two values fall back to row 0 as-is.
+    share a consistent, substantial set of populated columns -- trusted as
+    where a real table begins. Returns (start_index, core_columns, found);
+    found=False falls back to row 0 as-is.
 
-    The "how wide should a real table be" yardstick is the widest
-    POPULATED row count anywhere in `rows`, not len(rows[0]) -- openpyxl
-    can report a sheet as wider than it really is due to leftover
-    formatting on cells that were never used, which would otherwise make
-    the core-size bar unreachable and silently disable detection."""
+    Table width is measured as the widest POPULATED row count in `rows`,
+    not len(rows[0]) -- openpyxl can report a sheet wider than it really
+    is due to leftover formatting on unused cells, which would otherwise
+    make the core-size bar unreachable."""
     n = len(rows)
     if n == 0:
         return 0, set(), False
@@ -991,20 +955,16 @@ class _XlsxRegion:
 def _segment_xlsx_grid(
     rows: list[list[str]], cell_rows: list[list[Any]], gap_before: list[bool]
 ) -> list["_XlsxRegion"]:
-    """Splits a worksheet's rows into one or more regions at blank-row gaps.
-    A sheet can legitimately hold several separate tables (a title, a
-    table, blank rows, another title, another table); without this,
-    treating the whole sheet as a single table would bury the second
-    table's real header inside the first table's data rows, as if it were
-    just another entry.
+    """Splits a worksheet's rows into regions at blank-row gaps -- a sheet
+    can legitimately hold several separate tables, and treating it as one
+    would bury the second table's header inside the first table's data.
 
     A blank gap only becomes a real boundary once the rows before it
-    already form a genuine, self-sufficient table on their own (i.e.
-    _find_table_region_start succeeds within that chunk alone) --
-    otherwise those rows are merged forward into the next chunk instead of
-    being finalized as their own title-only, tableless region. This also
-    keeps a title+subtitle pair sitting above its own table across a blank
-    spacer row from being wrongly split into two pieces."""
+    already form a self-sufficient table (_find_table_region_start
+    succeeds within that chunk alone); otherwise they merge forward into
+    the next chunk instead of finalizing as a title-only region. This also
+    keeps a title+subtitle pair from being wrongly split across a blank
+    spacer row above their own table."""
     raw_chunks: list[tuple[list[list[str]], list[list[Any]]]] = []
     cur_rows, cur_cells = [rows[0]], [cell_rows[0]]
     for i in range(1, len(rows)):
@@ -1024,14 +984,10 @@ def _segment_xlsx_grid(
         table_start, core, found = _find_table_region_start(combined_rows)
         if found:
             titles = _classify_leading_title_rows(combined_rows, table_start, core)
-            # table_start from _find_table_region_start is only the right
-            # slice point when rows above it were actually confirmed as
-            # titles -- otherwise a real, meaningful row (e.g. a two-row
-            # grouped header, correctly left out of `titles`) could get
-            # silently excluded by slicing at the detected region-start
-            # index regardless of what was actually confirmed as a title.
-            # When titles is empty, nothing was confidently reclassified,
-            # so the whole region -- starting at its own row 0 -- is the table.
+            # Slice at max(titles)+1, not table_start -- table_start is only
+            # correct when rows above it were actually confirmed as titles;
+            # if titles is empty, nothing was reclassified, so the region
+            # starts at its own row 0.
             effective_start = (max(titles) + 1) if titles else 0
             regions.append(_XlsxRegion(combined_rows, combined_cells, titles, effective_start))
             pending_rows, pending_cells = [], []

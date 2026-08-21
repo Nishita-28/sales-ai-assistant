@@ -293,14 +293,9 @@ def build_index(chunks: list[dict[str, Any]]) -> int:
 def add_document_to_index(path: str | Path) -> tuple[int, list[str]]:
     """Loads, chunks, and embeds a single document, then upserts it into
     the existing index -- other documents' chunks are left untouched.
-    Returns (chunk_count, warnings) -- warnings are load_document()'s own
+    Returns (chunk_count, warnings), surfacing load_document()'s own
     coverage/structure checks (dropped cells, implausible header
-    detection), surfaced here so they reach an admin instead of being
-    silently discarded. See document_loader.check_table_structure
-    for why a document can have real, serious problems -- a table's real
-    header silently replaced by unrelated body text -- that produce zero
-    dropped-cell warnings, since nothing is actually missing, just
-    organized wrong."""
+    detection) to the admin instead of discarding them silently."""
     from app.chunker import assign_product_name_avoiding, chunk_approved_claims, chunk_document
     from app.claim_checker import APPROVED_CLAIMS_DOCUMENT_NAME
     from app.document_loader import load_document
@@ -426,11 +421,10 @@ def _distinctive_product_tokens(product_names: list[str]) -> dict[str, set[str]]
 
 
 def _shared_family_tokens(product_names: list[str]) -> dict[str, set[str]]:
-    """The complement of _distinctive_product_tokens(): tokens shared
-    across multiple product names -- excluded there because they don't
-    narrow to one specific product, but they're still a real brand-family
-    reference (e.g. "FIXaHY", spanning several variants), not nothing.
-    Maps each such token to the product names that share it."""
+    """Complement of _distinctive_product_tokens(): tokens shared across
+    multiple products (e.g. "FIXaHY") -- still a real brand-family
+    reference, just not specific enough to narrow to one product. Maps
+    each such token to the product names that share it."""
     all_tokens = _product_name_tokens(product_names)
     doc_frequency = Counter(tok for tokens in all_tokens.values() for tok in tokens)
     max_shared = max(2, len(product_names) // 3)
@@ -443,58 +437,37 @@ def _shared_family_tokens(product_names: list[str]) -> dict[str, set[str]]:
 
 
 def _is_single_product_document(document_name: str) -> bool:
-    """Competitor-comparison, historical-sales, and other reference
-    documents describe many things at once under one umbrella heading
-    (e.g. "Hydrogen Sensor Performance Comparison", or a sales log titled
-    "...Customer and Use Case with Value") -- they're valid evidence in
-    ordinary top-k retrieval, but that heading must not be eligible for
-    single/multi-product name detection below: a query merely containing
-    a generic word from it (e.g. "sensor", or an ordinary discovery
-    question naturally containing "customer"/"use case") would otherwise
-    get hard-scoped to only that document, silently excluding the actual
-    product catalogues it should be searching instead.
-
-    Driven by the explicit Admin-assigned document type (app.document_types),
-    not filename pattern-matching -- a filename-keyword heuristic is too
-    easy to fool by a reference document whose name just doesn't happen
-    to contain the expected keyword."""
+    """True only for real product catalogues. Reference documents (a
+    competitor comparison, a sales log) also carry one umbrella heading,
+    but a generic word from that heading (e.g. "sensor") must not
+    hard-scope a query to just that document instead of the real
+    catalogues. Driven by the Admin-assigned document type, not a
+    filename heuristic, which would be too easy to fool."""
     from app.document_types import is_product_catalogue
 
     return is_product_catalogue(document_name)
 
 
 def main_assistant_excluded_document_names() -> set[str]:
-    """Every currently-indexed document whose Admin-assigned type is
-    excluded from the main Assistant (see
-    app.document_types.MAIN_ASSISTANT_EXCLUDED_TYPES) -- internal sales-
-    strategy documents hold MNST's own subjective judgment (self-scored
-    competitive positioning, per-vertical objections/stakeholder notes)
-    rather than independently verified fact, and are meant to feed sales-
-    prep tools where either a claim-checking guardrail sits between the
-    content and a customer (Sales Aid) or the output stays internal,
-    rep-facing prep (Discovery Questions) -- never the main Assistant,
-    where a retrieved chunk goes straight into a rep-visible answer with
-    no such check. sales_aid_generator.py and discovery_generator.py both
-    call retrieve() directly (not through rag_pipeline.py), so they're
-    unaffected by this; rag_pipeline.py adds this set to every retrieve()
-    call the main Assistant makes."""
+    """Documents excluded from the main Assistant (see
+    app.document_types.MAIN_ASSISTANT_EXCLUDED_TYPES) -- internal
+    sales-strategy content is MNST's own subjective judgment, not
+    verified fact, so it may feed Sales Aid (guardrail-checked) or
+    Discovery (internal-only) but never the Assistant's unchecked
+    rep-facing answers. rag_pipeline.py applies this set; Sales Aid and
+    Discovery call retrieve() directly and are unaffected."""
     from app.document_types import is_excluded_from_main_assistant
 
     return {name for name in all_document_names() if is_excluded_from_main_assistant(name)}
 
 
 def _detect_mentioned_products(query: str, product_names: list[str]) -> list[str]:
-    """Which of the currently indexed products, if any, the query actually
-    names -- 0 for a generic question, 1 to scope to that product, 2+ for a
-    comparison question spanning exactly those products. A query that
-    names one distinctive product AND a shared family prefix (e.g. "FIXaHY",
-    spanning several variants -- "difference between FIXaHY and PORTaHY")
-    pulls in every product sharing that prefix too, so a family mention
-    alongside a specific product isn't silently dropped from retrieval;
-    a family prefix with nothing else distinctive alongside it stays
-    unscoped, unchanged (see is_ambiguous_product_reference for that case,
-    which is handled separately -- broad-but-real is not "name a product
-    for scoping purposes")."""
+    """Which indexed products, if any, the query names -- 0 for generic,
+    1 to scope to that product, 2+ for a comparison. Naming one distinctive
+    product plus a shared family prefix (e.g. "FIXaHY") pulls in every
+    product sharing that prefix too. A family prefix alone, with nothing
+    distinctive alongside it, stays unscoped -- see
+    is_ambiguous_product_reference for that case."""
     query_words = set(re.findall(r"[a-zA-Z0-9]+", query.lower()))
     distinctive = _distinctive_product_tokens(product_names)
     mentioned = {name for name, tokens in distinctive.items() if tokens & query_words}
@@ -509,11 +482,9 @@ def _detect_mentioned_products(query: str, product_names: list[str]) -> list[str
 
 
 def _product_names_for_scoping(collection) -> list[str]:
-    """Single-product-document names (see _is_single_product_document)
-    currently indexed -- the pool every product-detection entry point
-    (retrieve()'s scoping, is_ambiguous_product_reference()) draws from,
-    so there's one place that knows how to go from "the live collection"
-    to "which product names exist," no second, divergent copy."""
+    """Currently indexed single-product-document names -- the shared pool
+    every product-detection entry point (retrieve()'s scoping,
+    is_ambiguous_product_reference()) draws from."""
     all_metadata = collection.get(include=["metadatas"])["metadatas"]
     return sorted({
         m["product_name"]
@@ -528,24 +499,18 @@ def _mentioned_products_for_query(query: str, collection) -> list[str]:
     return _detect_mentioned_products(query, _product_names_for_scoping(collection))
 
 
-# Closed set of generic English words a question can use to refer back to
-# "a product" without naming one -- not product names or domain terms, so
-# this doesn't need to change as the catalogue changes. Allows up to two
-# words between "the" and the noun ("the hydrogen sensor") since a
-# genuinely generic descriptor there doesn't name anything either; whether
-# that phrase turns out to actually name a product (e.g. "the FIXaHY
-# sensor") is decided separately, by is_ambiguous_product_reference().
+# Generic English words that refer to "a product" without naming one --
+# closed set, not catalogue-dependent. Allows up to two words between
+# "the" and the noun ("the hydrogen sensor"); whether that phrase actually
+# names a product is decided separately by is_ambiguous_product_reference().
 _AMBIGUOUS_REFERENCE_RE = re.compile(
     r"\b(this|these|it)\b|\bthe (?:\w+\s+){0,2}(product|device|unit|sensor|detector|instrument|system)\b",
     re.IGNORECASE,
 )
 
-# "the lightest product", "the cheapest sensor", "the most accurate
-# detector" -- grammatically the same shape _AMBIGUOUS_REFERENCE_RE
-# matches ("the [word] product"), but a fundamentally different intent:
-# not confusion about which single, already-existing thing is meant, but
-# a deliberate request to rank/compare across the whole catalog, which
-# shouldn't trigger a "could you specify which product?" clarification.
+# Same shape as _AMBIGUOUS_REFERENCE_RE ("the [word] product") but a
+# different intent -- ranking across the catalog, not confusion about
+# which product is meant -- so it must not trigger a clarification ask.
 _SUPERLATIVE_RE = re.compile(
     r"\b(most|least)\s+\w+|\b\w{4,}est\b|\b(better|best|worse|worst)\b",
     re.IGNORECASE,
@@ -596,14 +561,10 @@ _PRODUCT_TYPE_TERMS: dict[str, str] = {
 
 def _product_type_ambiguous(query: str, product_names: list[str]) -> bool:
     """True if the query names a product CATEGORY (e.g. "leak detector")
-    that 2+ currently-indexed products share, without the query naming a
-    specific product or brand distinctly enough to narrow to one of them.
-    This is the fix for e.g. "the leak detector" resolving to AURIGA
-    purely because AURIGA's name happens to spell that phrase out in full
-    while FIXaHY/PORTaHY/VISION abbreviate it as "H2 LD" -- a naming
-    accident, not a real distinguishing feature. Only fires for category
-    terms actually present in _PRODUCT_TYPE_TERMS, so it can't drift as
-    new, unrelated vocabulary gets used in queries."""
+    shared by 2+ indexed products, without naming a specific product/brand.
+    Catches e.g. "the leak detector" resolving to AURIGA just because its
+    name spells that phrase out in full, while FIXaHY/PORTaHY/VISION
+    abbreviate it as "H2 LD" -- a naming accident, not a real distinction."""
     query_lower = query.lower()
     query_words = set(re.findall(r"[a-zA-Z0-9]+", query_lower))
     types_present = {canonical for term, canonical in _PRODUCT_TYPE_TERMS.items() if term in query_lower}
@@ -634,16 +595,12 @@ def _product_type_ambiguous(query: str, product_names: list[str]) -> bool:
 
 
 def _cross_brand_ambiguous(query: str, product_names: list[str]) -> bool:
-    """True if the query's words span 2+ DIFFERENT brand families (not
-    variants of the same one) without the query naming any single
-    product completely or naming at least one brand directly. Catches
-    e.g. "size of H2 LD" -- "H2" and "LD" are too short/generic to
-    register as distinctive or shared tokens for retrieval-scoping
-    purposes (see _distinctive_product_tokens / _shared_family_tokens),
-    but the phrase still genuinely spans multiple, materially different
-    products (e.g. FIXaHY H2 LD XX, a fixed unit, vs. VISION H2 LD XX) --
-    unlike "the FIXaHY sensor", which spans only variants of one brand,
-    or "FIXaHY vs PORTaHY", which names both brands directly on purpose."""
+    """True if the query's words span 2+ DIFFERENT brand families without
+    naming any single product completely or any brand directly. Catches
+    e.g. "size of H2 LD" -- "H2"/"LD" are too short/generic to register as
+    distinctive tokens, but the phrase still spans materially different
+    products (FIXaHY H2 LD XX vs. VISION H2 LD XX). Unlike "the FIXaHY
+    sensor" (one brand) or "FIXaHY vs PORTaHY" (both named on purpose)."""
     query_words = set(re.findall(r"[a-zA-Z0-9]+", query.lower()))
     all_tokens = _product_name_tokens(product_names)
 
@@ -665,13 +622,10 @@ def _cross_brand_ambiguous(query: str, product_names: list[str]) -> bool:
         return False  # explicit multi-brand comparison, e.g. "FIXaHY vs PORTaHY"
 
     if len(directly_named_brands) == 1:
-        # A brand was named directly -- the cross-brand overlap above is
-        # just incidental (other brands happening to share a generic
-        # term). Check whether the query's tokens narrow to one clear
-        # variant within the NAMED brand specifically, e.g. "FIXaHY H2
-        # LD" (missing "XX") still matches FIXaHY H2 LD XX on 3 of its 4
-        # tokens, versus just 1 (the bare brand name) for FIXaHY Analyzer
-        # Series or FIXaHY-4220MA-RRNNVVII.
+        # A brand was named directly, so the cross-brand overlap above is
+        # incidental. Check if the query narrows to one clear variant
+        # within that brand (e.g. "FIXaHY H2 LD" matches FIXaHY H2 LD XX
+        # on 3/4 tokens, vs. 1 for other FIXaHY products).
         named_brand = next(iter(directly_named_brands))
         overlaps = {
             name: len(all_tokens[name] & query_words)
@@ -687,26 +641,16 @@ def _cross_brand_ambiguous(query: str, product_names: list[str]) -> bool:
 
 
 def is_ambiguous_product_reference(query: str) -> bool:
-    """True if the query refers to a product generically ("this", "it",
-    "the sensor"...) without naming a real one, OR spans multiple
-    different product families via generic shared terms without naming
-    any of them directly (see _cross_brand_ambiguous). Retrieval can't
-    resolve either kind of reference on its own -- a topical/keyword
-    match only means some excerpt discusses the same feature asked
-    about, not that it's confirmed to be the product the user has in
-    mind, so callers should ask for clarification instead of treating
-    retrieved matches as an answer. A shared family prefix (e.g. "the
-    FIXaHY sensor") still counts as naming something real, even though
-    it doesn't narrow to one specific variant -- broad is not the same
-    as empty. A "list all X" style query (see _is_list_all_products_query)
-    is a different intent entirely -- deliberately asking for every
-    matching product, not confused about which single one -- so it's
-    never treated as ambiguous even when its wording spans multiple
-    brands (e.g. "list all fixed H2 detectors"). A category term shared
-    by multiple products (see _product_type_ambiguous) is also ambiguous
-    even when it happens to be one product's literal name text (e.g.
-    "the leak detector" naming AURIGA only by naming-convention accident,
-    when 5 of 6 products are actually leak detectors)."""
+    """True if the query refers to a product generically ("this", "the
+    sensor") without naming a real one, or spans multiple brand families
+    via generic shared terms (_cross_brand_ambiguous), or uses a category
+    term shared by multiple products (_product_type_ambiguous). Retrieval
+    can't resolve any of these on its own -- a topical match isn't
+    confirmation of which product is meant, so callers should ask for
+    clarification. Exceptions: a shared family prefix ("the FIXaHY
+    sensor") still names something real; a "list all X" query
+    (_is_list_all_products_query) deliberately wants every match, so it's
+    never ambiguous even when it spans multiple brands."""
     if _is_list_all_products_query(query):
         return False
     if _SUPERLATIVE_RE.search(query):
@@ -762,16 +706,11 @@ def is_self_referential_without_own_products(
 def _interleave_balanced_matches(
     matches: list[dict[str, Any]], product_names: list[str]
 ) -> list[dict[str, Any]]:
-    """Reassembles a flat match list into round-robin order across
-    product_names -- best-of-product-1, best-of-product-2, ..., then
-    second-best-of-product-1, etc. -- instead of one contiguous block per
-    product (which still buries every product but the first behind a
-    wall of one product's content) or a plain similarity sort (which
-    silently re-introduces the exact per-product domination
-    _retrieve_balanced_across_products exists to prevent): a global sort
-    can push a lower-scoring product's chunks far enough down a large
-    context that the model only discusses whichever products it saw
-    first."""
+    """Round-robins matches across product_names (best-of-product-1,
+    best-of-product-2, ..., second-best-of-product-1, ...) instead of one
+    block per product or a plain similarity sort -- either would bury a
+    lower-scoring product's chunks deep enough that the model only
+    discusses whichever products it saw first."""
     by_product: dict[str, list[dict[str, Any]]] = {}
     for m in matches:
         by_product.setdefault(m["metadata"].get("product_name"), []).append(m)
@@ -798,14 +737,10 @@ def _retrieve_balanced_across_products(
     query_embedding: list[list[float]], collection, product_names: list[str], top_k: int
 ) -> list[dict[str, Any]]:
     """Retrieves a fair share of chunks per named product instead of one
-    shared top-k, so a comparison question isn't silently dominated by
-    whichever product's chunks happen to score higher overall -- a single
-    $in-filtered query was tried first and confirmed (via real testing,
-    not assumption) to let one product crowd out the other entirely. A
-    higher floor than plain top_k division matters here specifically: a
-    short, differently-phrased spec row (e.g. an "Area of Deployment"
-    line) can lose out to a cluster of similar-sounding feature bullets
-    at a narrow per-product count, even though it's the more decisive fact."""
+    shared top-k, so a comparison isn't dominated by whichever product's
+    chunks score higher overall. Uses a higher floor than plain top_k
+    division since a short, differently-phrased spec row can otherwise
+    lose out to a cluster of similar-sounding feature bullets."""
     per_product = max(COMPARISON_CHUNKS_PER_PRODUCT, top_k // len(product_names))
     matches: list[dict[str, Any]] = []
     for name in product_names:
@@ -849,11 +784,9 @@ def _keyword_boost_matches(
     where: Optional[dict] = None,
 ) -> list[dict[str, Any]]:
     """Finds chunks that literally contain a query keyword but fell outside
-    the vector top_k, and ranks them by similarity among themselves.
-    Matching is done in Python (case-insensitive) since Chroma's own
-    $contains filter is case-sensitive. Respects the same product scope as
-    the caller's main search, if any -- otherwise a keyword match could
-    reintroduce the exact cross-product bleed the scope was meant to stop."""
+    the vector top_k. Matches in Python (case-insensitive) since Chroma's
+    own $contains filter is case-sensitive. Respects the caller's product
+    scope, if any, so it can't reintroduce cross-product bleed."""
     keywords = _extract_keywords(query)
     if not keywords:
         return []
@@ -903,34 +836,22 @@ def retrieve(
     scope_to_products: bool = True,
     mentioned_products: Optional[list[str]] = None,
 ) -> dict[str, Any]:
-    """Retrieves the top_k most relevant chunks for a question, plus any
-    keyword-matched chunks the vector search missed (see
-    _keyword_boost_matches), along with a confidence level ("high", "low",
-    or "none") based on similarity. exclude_document_names filters those
-    documents out of the vector search itself (not just the returned
-    results) -- for a caller that already knows some documents can never
-    be a valid answer (e.g. discovery_generator.py excluding the sales-
-    history spreadsheet from product recommendations), filtering after
-    the fact isn't enough: a dominant non-product document can occupy the
-    entire top-k regardless of how wide it's fetched, leaving nothing
-    real behind after post-hoc filtering.
+    """Retrieves the top_k most relevant chunks for a question, plus
+    keyword-matched chunks the vector search missed, with a confidence
+    level ("high"/"low"/"none") based on similarity.
 
-    scope_to_products=False skips narrowing to a single detected product
-    entirely -- for callers that need breadth across multiple MNST
-    products AND non-product documents (e.g. a competitor comparison) in
-    the same call, like sales_aid_generator.py. Without it, a comparison
-    query that happens to match one MNST product's distinctive tokens
-    can silently scope the entire top_k to that one product and exclude
-    the competitor-comparison document completely.
+    exclude_document_names filters out of the vector search itself, not
+    just the results -- otherwise a dominant excluded document could
+    occupy the whole top_k regardless of how wide it's fetched.
 
-    mentioned_products, when given, is used in place of this function's
-    own _mentioned_products_for_query detection -- for a caller (the
-    dispatcher) that already resolved which products the query names
-    with better information than exact-token matching can (e.g. fuzzy
-    typo tolerance: "porthay" for PORTaHY). Without this, the function's
-    own re-detection can come back narrower than the caller's resolution
-    and silently filter the surviving pool down to fewer products than
-    the caller intended."""
+    scope_to_products=False skips single-product narrowing, for callers
+    needing breadth across multiple MNST products plus non-product
+    documents in one call (e.g. sales_aid_generator.py's competitor
+    comparisons).
+
+    mentioned_products, when given, overrides this function's own product
+    detection -- for a caller (the dispatcher) with better resolution
+    than exact-token matching (e.g. typo tolerance: "porthay")."""
     collection = get_collection()
 
     try:
@@ -947,13 +868,10 @@ def retrieve(
 
     query_embedding = embed_texts([query])
 
-    # mentioned_products is None checked first: when the caller (the
-    # dispatcher) has already resolved specific products, that decision
-    # must win over this function's own "list every document" shortcut --
-    # a query like "compare auriga and all fixahy products" still
-    # contains "all"/"products" and would otherwise be read as a request
-    # to list every document in the collection, discarding the
-    # dispatcher's correct product scoping.
+    # Checked only when the caller hasn't already resolved products: a
+    # query like "compare auriga and all fixahy products" still contains
+    # "all"/"products" and would otherwise be misread as "list everything",
+    # discarding the dispatcher's correct product scoping.
     if mentioned_products is None and _is_list_all_products_query(query):
         try:
             matches = _retrieve_one_per_document(query_embedding, collection)
@@ -999,40 +917,22 @@ def retrieve(
             matches.extend(boosted)
 
         if len(mentioned) >= 2:
-            # Always interleave here, whether or not boosting added
-            # anything -- _retrieve_balanced_across_products' own output
-            # is already contiguous blocks (all of product A, then all of
-            # product B, ...), which still buries every product but the
-            # first behind a wall of one product's content. A plain
-            # similarity sort would be even worse: it would silently undo
-            # the fairness _retrieve_balanced_across_products just built
-            # (see _interleave_balanced_matches).
+            # _retrieve_balanced_across_products' output is contiguous
+            # blocks per product; interleave so no product is buried, and
+            # never plain-sort (that would undo the fairness just built).
             matches = _interleave_balanced_matches(matches, mentioned)
         elif boosted:
             matches.sort(key=lambda m: m["similarity"], reverse=True)
 
         if len(mentioned) >= 1:
-            # Supplement with a genuinely unscoped pass (respecting only
-            # exclude_where, not the product_name restriction) appended
-            # after whatever's already in matches, never mixed into the
-            # ranked/interleaved order. Two reasons this matters: (1)
-            # dispatcher.py forces mentioned_products to every currently
-            # approved product for a question naming no specific one
-            # (e.g. "what industries use the fixed hydrogen leak
-            # detector"), so that a spec comparison gets fair per-product
-            # coverage -- but _retrieve_balanced_across_products queries
-            # strictly by product_name, which structurally can never
-            # surface a reference document (the Industry Use Case Guide,
-            # exactly what that question needs) since its chunks aren't
-            # tagged with any product name at all; (2) the exact same gap
-            # for a single clearly-named product -- "what is PORTaHY's
-            # recommended probe length" never saw any Approved Claims
-            # content at all without this, since boost_where =
-            # {"product_name": mentioned[0]} excludes every reference
-            # document just as completely as the multi-product path did.
-            # This has no effect when exclude_where already rules
-            # reference documents out (a genuine multi-product comparison,
-            # which intentionally excludes them -- see
+            # Append an unscoped supplemental pass (product_name filter
+            # dropped, exclude_where kept) rather than mixing it into the
+            # ranked order. Needed because product_name-scoped queries can
+            # never surface a reference document (e.g. the Industry Use
+            # Case Guide, or Approved Claims content for "what is
+            # PORTaHY's recommended probe length") since those chunks
+            # aren't tagged with any product name. No-op when exclude_where
+            # already rules reference documents out (see
             # dispatcher._scoped_result).
             try:
                 supplement = collection.query(
@@ -1070,15 +970,12 @@ SUPPORTED_DOC_EXTENSIONS = {".docx", ".pptx", ".pdf", ".csv", ".xlsx", ".md", ".
 
 def load_and_chunk_approved_docs(docs_dir: str | Path = "data/approved_docs") -> list[dict[str, Any]]:
     """Loads and chunks every supported file in docs_dir, plus the
-    Approved Claims reference file (see app.claim_checker.
-    APPROVED_CLAIMS_DOCUMENT_NAME), always -- it lives outside docs_dir
-    (it's admin-managed content, not a rep-uploaded document, so it stays
-    out of the Documents tab's list/remove/type-assignment UI), but still
-    needs to be part of every full rebuild so it survives a server
-    restart, not just the one-off reindex the Approved Claims tab's own
-    Save button triggers. Returns plain dicts ready for build_index().
-    A file that fails to load is skipped with a warning rather than
-    aborting the whole reindex."""
+    Approved Claims reference file (app.claim_checker.
+    APPROVED_CLAIMS_DOCUMENT_NAME) -- it lives outside docs_dir and the
+    Documents tab, but must still survive a full rebuild, not just the
+    Approved Claims tab's own one-off reindex. Returns plain dicts ready
+    for build_index(); a file that fails to load is skipped with a
+    warning rather than aborting the whole reindex."""
     from app.chunker import chunk_approved_claims, chunk_documents
     from app.claim_checker import APPROVED_CLAIMS_DOCUMENT_NAME
     from app.claims_store import load_claims
@@ -1092,11 +989,8 @@ def load_and_chunk_approved_docs(docs_dir: str | Path = "data/approved_docs") ->
     paths = sorted(docs_dir.iterdir()) if docs_dir.exists() else []
 
     for path in paths:
-        # "~$..." lock files Word/Excel/PowerPoint drop next to a
-        # document while it's open elsewhere -- not a real document,
-        # already handled gracefully by the try/except below (fails to
-        # load, gets skipped with a warning), but excluding it outright
-        # avoids that wasted attempt and spurious warning every rebuild.
+        # "~$..." lock files Word/Excel/PowerPoint drop next to an open
+        # document -- excluded outright to avoid a wasted load attempt.
         if not path.is_file() or path.suffix.lower() not in SUPPORTED_DOC_EXTENSIONS or path.name.startswith("~$"):
             continue
         try:

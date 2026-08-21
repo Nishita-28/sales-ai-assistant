@@ -1,23 +1,16 @@
-"""Runs a slow document-management operation (remove/add/rebuild -- see
-admin_page.py) on a background thread, so the admin who triggered it isn't
-stuck on a blocking spinner and can navigate to another page immediately.
+"""Runs a slow document-management operation (remove/add/rebuild) on a
+background thread, so the admin isn't stuck on a blocking spinner.
 
 Streamlit has no push-update mechanism between a background thread and a
-browser session, and st.session_state is bound to the session that created
-it -- a background thread can't reliably write into it. Job status lives
-instead in a plain module-level dict, which IS shared across every session
-in this process (a single `streamlit run` process serves every browser
-tab), so any page's sidebar can poll it. A caller sees a status change only
-on its next rerun -- see streamlit_app.py's sidebar fragment, which uses
-st.fragment(run_every=...) to poll this on a short timer without
-rerunning (or blocking) the rest of the page.
+browser session, and st.session_state is bound to its own session, so a
+background thread can't write into it. Job status lives instead in a
+plain module-level dict shared across every session in this process, so
+any page's sidebar can poll it (see streamlit_app.py's fragment, which
+uses st.fragment(run_every=...) to poll on a short timer).
 
-One job at a time, deliberately: two of these running concurrently would
-race on the same Chroma index and JSON config files (remove_document_from_
-index, rebuild_product_registry, etc. were never written to be safe under
-real concurrent writes) -- _LOCK serializes them, and a second job started
-while one is still running waits for the first to finish before its own
-work begins, rather than running alongside it.
+One job at a time, deliberately: concurrent jobs would race on the same
+Chroma index and JSON config files, which were never written to be safe
+under real concurrent writes -- _LOCK serializes them.
 """
 from __future__ import annotations
 

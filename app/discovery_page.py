@@ -91,14 +91,12 @@ def _render_right_to_win_card(
     i: int, point: RightToWinPoint, answers: dict[str, str], deal_id: int | None = None
 ) -> None:
     """One Right-to-Win card -- title, a one-line "why it matters" (kept
-    short so a rep prepping for a call isn't scrolling past dense
-    paragraphs to reach the questions), the questions to ask, and the
-    detailed evidence tucked into a collapsed expander. Shared by the live
-    (mid-stream) render (deal_id left as None -- transient cards during
-    generation don't save on every keystroke) and the persisted
-    post-generation render (deal_id passed through, so answers save
-    immediately), using the same `answers` dict and widget key scheme so a
-    typed-ahead answer survives the switch between them."""
+    short so a rep isn't scrolling past dense paragraphs to reach the
+    questions), the questions to ask, and evidence in a collapsed
+    expander. Shared by the live mid-stream render (deal_id=None, so
+    transient cards don't save on every keystroke) and the persisted
+    post-generation render (deal_id passed through, answers save
+    immediately) -- same `answers` dict and widget keys across both."""
     with st.container(border=True):
         st.markdown(f"**Right to Win #{i} -- {point.title}**")
 
@@ -243,12 +241,9 @@ def render_discovery_page() -> None:
         st.info("Pick an existing deal, or start a new one above (Customer Name + Company), to continue.")
         return
 
-    # Auto-saves the draft to the deal on every commit (losing focus, or
-    # Ctrl+Enter) so switching tabs or clicking elsewhere never loses what's
-    # been typed. Does not auto-trigger generation -- Streamlit's on_change
-    # fires the same whether the box lost focus from Ctrl+Enter or simply
-    # alt-tabbing away, so generation only ever happens from the explicit
-    # button below.
+    # Auto-saves the draft to the deal on every commit (losing focus or
+    # Ctrl+Enter) so switching tabs never loses what's been typed. Does not
+    # auto-trigger generation -- that only happens from the button below.
     def _save_use_case_draft(deal_id: int | None, widget_key: str) -> None:
         if deal_id is not None:
             value = st.session_state.get(widget_key, "").strip()
@@ -279,13 +274,10 @@ def render_discovery_page() -> None:
                     matches, text_stream = stream_discovery_questions(use_case)
                     sources = dedupe_sources(matches)
 
-                # Renders each Right-to-Win card as soon as it's complete,
-                # instead of making a rep wait for the whole multi-point
-                # reply -- only the point still being generated shows as raw
-                # streaming text below the already-rendered cards. Also
-                # saves to deals.db after each point completes (not just once
-                # the whole reply is done), so navigating away mid-generation
-                # never loses points that already finished streaming.
+                # Renders each Right-to-Win card as soon as it's complete
+                # (only the in-progress point shows as raw streaming text)
+                # and saves to deals.db after each one, so navigating away
+                # mid-generation never loses points already finished.
                 live_answers: dict[str, str] = {}
                 completed_points: list[RightToWinPoint] = []
                 points_slot = st.container()
@@ -314,12 +306,10 @@ def render_discovery_page() -> None:
                 st.session_state.pop("discovery_recommendation", None)
                 save_discovery(deal_id, [p.to_dict() for p in result.right_to_win], {}, result.sources)
 
-                # Which of this deal's 8 MEDDPICC fields are still blank,
-                # and what to ask about them next -- deterministic field
-                # selection, LLM-phrased question/rationale grounded in
-                # the Golden Frameworks & Sales Tactics document. Never
-                # blocks the page on failure -- Right-to-Win is the core
-                # deliverable of this click; qualification is additive.
+                # Deterministic field selection, LLM-phrased question/
+                # rationale grounded in Golden Frameworks & Sales Tactics.
+                # Never blocks the page on failure -- Right-to-Win is the
+                # core deliverable of this click; qualification is additive.
                 try:
                     with st.spinner("Checking qualification status..."):
                         deal = get_deal(deal_id)

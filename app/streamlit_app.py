@@ -66,14 +66,10 @@ st.set_page_config(
 )
 theme.inject_theme()
 
-# ---------------------------------------------------------------------------
-# Cold-start sync from Neon -- Streamlit Community Cloud's filesystem is
-# ephemeral, so a fresh container's local data/approved_docs/ is either
-# empty or stale. When DATABASE_URL is configured, Postgres is the durable
-# source of truth: pull every stored document to local disk, then rebuild
-# the local Chroma index and product registry, once per server process.
-# No-op when DATABASE_URL isn't set.
-# ---------------------------------------------------------------------------
+# Cold-start sync from Neon -- Streamlit Cloud's filesystem is ephemeral,
+# so a fresh container's local data/approved_docs/ is empty or stale.
+# When DATABASE_URL is set, pulls every document from Postgres and rebuilds
+# the local Chroma index + product registry, once per server process.
 @st.cache_resource(show_spinner="Loading knowledge base -- this can take a couple of minutes on a cold start...")
 def _sync_from_neon_on_cold_start() -> None:
     if not is_postgres_enabled():
@@ -203,11 +199,9 @@ def _render_background_job_status() -> None:
 
 
 with st.sidebar:
-    # Logo is positioned above the nav via CSS (see theme.py), since
-    # Streamlit's auto nav list is a DOM sibling that can't be
-    # interleaved with content from `with st.sidebar:`. Admin is a
-    # regular nav page (see render_admin_gate below), so nothing
-    # admin-related renders in this sidebar block.
+    # Logo is positioned above the nav via CSS (theme.py) since Streamlit's
+    # auto nav list is a DOM sibling that can't be interleaved with content
+    # from `with st.sidebar:`.
     st.markdown(theme.render_logo_html(), unsafe_allow_html=True)
     st.markdown(
         f"""
@@ -338,14 +332,10 @@ def render_assistant_page() -> None:
     tool rather than an accumulating chat log."""
     st.title("Assistant")
 
-    # Rendered into an explicit st.empty() placeholder, cleared right after
-    # the `with` block below finishes -- pushes an incremental update to the
-    # browser within this same script run (no st.rerun() needed), so the row
-    # disappears before falling through into _ask_and_record() below.
-    # Clearing the placeholder must happen AFTER the `with` block exits, not
-    # from inside it -- calling .empty() on a placeholder while still
-    # writing into that same placeholder corrupts Streamlit's frontend
-    # render tree and crashes the page blank.
+    # Rendered into an explicit st.empty() placeholder so it can be cleared
+    # without an st.rerun(). Must call .empty() AFTER the `with` block
+    # exits, not from inside it -- clearing a placeholder while still
+    # writing into it corrupts Streamlit's render tree and crashes blank.
     try_asking_slot = st.empty()
     clicked_sample_question = None
     if not st.session_state.history and "pending_question" not in st.session_state:
@@ -428,10 +418,9 @@ def _safe_page(render_fn):
     """Wraps a page function so an uncaught exception shows a plain refresh
     message instead of Streamlit's raw traceback. Needed because
     st.navigation(pages).run() does not let an exception raised inside the
-    selected page function propagate out to a try/except wrapped around the
-    .run() call itself -- confirmed against a real DatabaseUnavailableError
-    in production, which reached Streamlit's own crash screen instead of the
-    try/except below (kept as a second, harmless layer of defense)."""
+    selected page function propagate out to a try/except around the .run()
+    call itself -- that outer try/except (below) is only a second, harmless
+    layer of defense, not sufficient on its own."""
 
     def wrapped() -> None:
         try:
@@ -442,11 +431,9 @@ def _safe_page(render_fn):
             _friendly_error(e)
 
     # st.Page infers each page's URL pathname from the callable's __name__
-    # when it isn't otherwise unique -- every wrapped() closure shares that
-    # same name by default, which made Streamlit see 5 identical pathnames
-    # and refuse to start at all (StreamlitAPIException: Multiple Pages
-    # specified with URL pathname wrapped). Restoring the original
-    # function's name keeps each page's pathname distinct.
+    # when not otherwise unique -- every wrapped() closure shares that name
+    # by default, which Streamlit refuses to start with (5 identical
+    # pathnames). Restoring the original name keeps each pathname distinct.
     wrapped.__name__ = render_fn.__name__
     return wrapped
 

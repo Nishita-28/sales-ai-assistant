@@ -1,20 +1,13 @@
 """Tests for app.document_loader's XLSX title/table-region detection --
-see the module docstring above _find_table_region_start for the full
-design rationale. Two groups:
+see the comment above _find_table_region_start for the full design
+rationale. Two groups: regression (a plain header-first table, and the
+real approved Historical Sales workbook must keep working), and new
+flexible formats (title/subtitle rows, multiple tables per sheet, and the
+cases a naive "sparse row = title" rule gets wrong).
 
-- Regression: sheets that already worked before this mechanism existed
-  (a plain header-first table, and the real approved Historical Sales
-  workbook) must still work exactly the same or better.
-- New flexible formats: title/subtitle rows above a table, multiple
-  separate tables on one sheet, and -- most importantly -- the cases a
-  naive "sparse row = title" rule gets wrong (a two-row grouped header,
-  and a value that recurs as real row data and must never be stripped).
-
-Every "not a title" case is checked by asserting NO heading block was
-produced and the real data survived untouched -- the property this
-mechanism is built around is that it's allowed to under-detect a title
-(leave it ambiguous, ship it as-is) but must never misclassify real data
-as a title and discard it.
+Every "not a title" case asserts NO heading block was produced and the
+real data survived untouched -- this mechanism may under-detect a title,
+but must never misclassify real data as a title and discard it.
 """
 from pathlib import Path
 
@@ -236,14 +229,11 @@ def test_sparse_but_real_first_data_row_is_untouched(tmp_path):
 
 
 def test_freak_wide_row_far_below_does_not_distort_detection(tmp_path):
-    """A single unusually long row far from the top (e.g. a note that
-    spills into extra columns) must not inflate the 'how wide should
-    this table be' measurement and wrongly strip real leading rows.
-    Status/Owner vary per row (unlike a repeated constant) specifically
-    so this test isolates title/width detection from the separate,
-    pre-existing _detect_header_row_count multi-row-header logic, which
-    a long run of identically-repeated cell values can independently
-    trigger regardless of this feature."""
+    """A single unusually long row far from the top must not inflate the
+    'how wide should this table be' measurement and wrongly strip real
+    leading rows. Status/Owner vary per row so this test isolates
+    title/width detection from the separate _detect_header_row_count
+    multi-row-header logic."""
     wb = Workbook()
     ws = wb.active
     ws.append(["Name", "Status", "Owner"])
@@ -256,22 +246,18 @@ def test_freak_wide_row_far_below_does_not_distort_detection(tmp_path):
     assert _headings(blocks) == []
     tables = _tables(blocks)
     assert len(tables) == 1
-    # This sheet has no genuine title, so detection correctly declines to
-    # touch anything (see _find_table_region_start's found=False path) --
-    # checked here as "nothing was lost," not exact column naming, since
-    # composite multi-row-header naming for this padded shape is a
-    # separate, pre-existing code path (_detect_header_row_count),
-    # unrelated to this feature.
+    # No genuine title here, so detection correctly declines to touch
+    # anything -- checked as "nothing was lost," not exact column naming.
     raw_text = str(tables[0]["raw_grid"])
     assert "Name" in raw_text and "Item 0" in raw_text and "Item 11" in raw_text
 
 
 def test_nominal_sheet_width_wider_than_actual_data_does_not_block_detection(tmp_path):
-    """Regression for the bug found against the real file: openpyxl can
-    report a sheet as wider than any row ever actually populates (old
-    formatting left on unused cells). The width used for detection must
-    come from the widest POPULATED row, not the sheet's nominal
-    dimensions, or detection silently fails across the whole sheet."""
+    """openpyxl can report a sheet as wider than any row ever actually
+    populates (old formatting left on unused cells). The width used for
+    detection must come from the widest POPULATED row, not the sheet's
+    nominal dimensions, or detection silently fails across the whole
+    sheet."""
     wb = Workbook()
     ws = wb.active
     ws["A1"] = "Report Title"
@@ -279,8 +265,7 @@ def test_nominal_sheet_width_wider_than_actual_data_does_not_block_detection(tmp
         ws.cell(row=2, column=i, value=h)
     ws.append(["1", "Acme", "Oil & Gas"])
     ws.append(["2", "Globex", "Power"])
-    # Force the sheet's nominal dimension far wider than any real data by
-    # styling a distant, otherwise-empty cell -- openpyxl then reports
+    # Styling a distant, otherwise-empty cell forces openpyxl to report
     # max_column well beyond column 3.
     ws["T50"].font = Font(bold=True)
     path = _save(wb, tmp_path, "phantom_width.xlsx")

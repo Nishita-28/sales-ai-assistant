@@ -1,15 +1,13 @@
 #python -m app.sales_aid_generator "multiple potential leak spots in close vicinity, 100% H2 contained in pipelines" "Metal Oxide Semiconductor Sensors"
 """Generates a short, customer-facing Sales Aid: a comparison document for
-a specific use case that a customer's technical champion can circulate
-internally. Reuses the same retrieval/LLM plumbing as the discovery flow --
-this is a distinct deliverable (a document to hand to a customer), so it's
-its own module rather than folded into discovery_generator.py.
+a specific use case a customer's technical champion can circulate
+internally. Reuses the discovery flow's retrieval/LLM plumbing, but is its
+own module since this is a distinct deliverable.
 
-Since this output is meant to leave the building, it goes through the same
-claim-checking guardrail and the same ALLOW_CUSTOMER_FACING_OUTPUT gate as
-the main assistant's customer-facing wording -- an unresolved risk flag or
-a disabled gate means "internal draft, needs review," never "ready to
-send."
+Since this output is meant to leave the building, it goes through the
+same claim-checking guardrail and ALLOW_CUSTOMER_FACING_OUTPUT gate as the
+Assistant's customer-facing wording -- an unresolved risk or a disabled
+gate means "internal draft, needs review," never "ready to send."
 """
 from __future__ import annotations
 
@@ -45,15 +43,12 @@ def _load_prompt(path: Path) -> str:
 
 @dataclass
 class SalesAidResult:
-    """customer_priorities/title/use_case_framing/comparison/customer_summary
-    come from the LLM's structured reply. comparison is a markdown table
-    (topic, MNST, competitor, and why each topic matters), scoped to only
-    the topics relevant to customer_priorities -- not every retrieved spec.
-    customer_summary is a separate, plain-prose paragraph meant to be
-    pasted into an email as-is, not a rendering of the table. ready_for_
-    customer is only True when the output is both enabled by config and
-    cleared by the claim-checking guardrail -- otherwise this is an
-    internal draft that needs human review before it can be shared."""
+    """Fields come from the LLM's structured reply. comparison is a
+    markdown table (topic, MNST, competitor, why it matters), scoped to
+    topics relevant to customer_priorities, not every retrieved spec.
+    customer_summary is a separate plain-prose paragraph meant to be
+    pasted into an email as-is. ready_for_customer is True only when both
+    enabled by config and cleared by the guardrail."""
 
     customer_priorities: list[str]
     title: str
@@ -104,35 +99,26 @@ def stream_sales_aid(
     mnst_products: Optional[list[str]] = None,
 ) -> tuple[list[dict[str, Any]], Iterator[str]]:
     """Streaming counterpart to generate_sales_aid(). Returns (matches,
-    text_stream) -- stream text_stream to the UI (e.g. via st.write_stream)
-    for live display of the raw reply as it's generated, then pass matches
-    and the full text it returns to finalize_sales_aid(). The raw reply is
-    structured (priorities/title/framing/comparison table/summary), so
-    what streams live is that raw text, not the final rendered
-    layout -- the properly parsed sections render once finalize_ runs,
-    same pattern as the Assistant page's streamed answer.
+    text_stream) -- stream text_stream to the UI, then pass matches and
+    the full text to finalize_sales_aid(). What streams live is the raw
+    structured text (priorities/title/framing/table/summary), not the
+    final rendered layout.
 
     mnst_products, when given, scopes the MNST side of the comparison to
-    exactly those products instead of leaving it to broad, unscoped
-    retrieval: a generic use case with no product named (e.g. "around the
-    clock monitoring") can rank chunks from two or more different MNST
-    products at the top, which the LLM then has no way to tell apart from
-    a real competitor without an explicit prompt rule (see
-    sales_aid_prompt.md's THIRD CRITICAL RULE). Letting the rep name the
-    product directly avoids relying on retrieval ranking alone to pick the
-    right one."""
+    exactly those products instead of broad, unscoped retrieval -- a
+    generic use case with no product named can rank chunks from 2+ MNST
+    products at the top, which the LLM has no way to tell apart from a
+    real competitor without this. Letting the rep name the product
+    directly avoids relying on retrieval ranking alone."""
     from app.retriever import all_document_names, retrieve
 
     query = use_case_description
     if compare_against.strip():
         query = f"{use_case_description} compared to {compare_against.strip()}"
 
-    # A single unscoped retrieve() lets one side's ranking dominate the whole
-    # top_k -- a query naming a competitor technology can pull almost
-    # entirely from the competitor-comparison document, leaving only 1-2
-    # MNST chunks, and vice versa when the query leans MNST. A real
-    # comparison needs guaranteed room for both sides, so retrieve them
-    # separately (each excluding the other's documents) and merge.
+    # A single unscoped retrieve() lets one side dominate the whole top_k
+    # -- a comparison needs guaranteed room for both sides, so retrieve
+    # them separately (each excluding the other's documents) and merge.
     all_names = all_document_names()
     competitor_docs = {n for n in all_names if "competitor" in n.lower() or "comparison" in n.lower()}
     mnst_docs = set(all_names) - competitor_docs

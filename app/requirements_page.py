@@ -95,15 +95,11 @@ _NUMERIC_CODE_RANGE_RE = re.compile(r"^(\d+)\s*(?:to|-|–)\s*(\d+)$", re.IGNORE
 def _numeric_code_range(value: str) -> tuple[int, int, int] | None:
     """(low, high, digit_width) if a segment's single documented value is
     a bare numeric code range like "01 to 50" -- a genuinely selectable
-    field (the customer picks one industry/application code from that
-    range at order time) that just doesn't have each individual code's
-    meaning spelled out, unlike a real single fixed spec such as
-    "04: LM6 Die Cast". digit_width preserves zero-padding (e.g. "01" ->
-    width 2) so a chosen code matches the catalogue's own numbering.
-    Without this, a range like FIXaHY-4220MA's "Industry: 01 to 50" would
-    be treated as a single fixed spec (like Enclosure) and hidden from the
-    rep entirely, when it's actually 50 real, selectable options -- just
-    ones the document doesn't individually name."""
+    field the document just doesn't spell out individually, unlike a real
+    fixed spec such as "04: LM6 Die Cast". digit_width preserves
+    zero-padding so a chosen code matches the catalogue's numbering.
+    Without this, a range like "Industry: 01 to 50" would be hidden from
+    the rep as if it were a single fixed spec."""
     m = _NUMERIC_CODE_RANGE_RE.match(value.strip())
     if not m:
         return None
@@ -114,15 +110,12 @@ def _numeric_code_range(value: str) -> tuple[int, int, int] | None:
 def _suggested_code(product: ProductIndexEntry, segment_selections: dict[str, str]) -> str:
     """Reconstructs a concrete ordering code from the product's own
     nomenclature template, substituting each selectable segment's
-    customer-chosen value into its position -- e.g. base "FIXaHY G/P/E
-    4220MA RR* NN VV* II" becomes "FIXaHY P 4220MA 02 04 03 II" once
-    real choices are made. A segment with only one documented value uses
-    it automatically (extracting a leading "04:"-style code from its
-    description when present); a genuinely unresolved multi-option
-    segment keeps its raw placeholder token (e.g. "II") rather than
-    guessing, so the output is always an honest code shape, never
-    silently wrong. Only called once every real choosable segment has an
-    answer (see render_requirements_page)."""
+    customer-chosen value into its position -- e.g. "FIXaHY G/P/E 4220MA
+    RR* NN VV* II" becomes "FIXaHY P 4220MA 02 04 03 II". A segment with
+    only one documented value uses it automatically; an unresolved
+    multi-option segment keeps its raw placeholder token rather than
+    guessing, so the output is always an honest shape, never silently
+    wrong."""
     if not isinstance(product.nomenclature, dict):
         return ""
     parts = []
@@ -142,13 +135,11 @@ def _suggested_code(product: ProductIndexEntry, segment_selections: dict[str, st
 
 
 def _format_option(code: str, value: str) -> str:
-    """"G" instead of "G - Unknown" -- a segment option the catalogue
-    lists as valid but never explains (e.g. FIXaHY-4220MA's Internal Code
-    G/P/E) still needs to be selectable, just without implying there's a
-    real description being withheld. Uses "code: value" (colon), not an en
-    dash, since "01 – 2000 ppm" would read as a range from 01 to 2000, when
-    01 is the option's code and 2000 ppm is its Span -- two unrelated
-    numbers."""
+    """"G" instead of "G - Unknown" -- an option the catalogue lists as
+    valid but never explains still needs to be selectable, without
+    implying a real description is being withheld. Uses "code: value"
+    (colon), not an en dash, since "01 – 2000 ppm" would misread as a
+    range rather than a code and its Span."""
     return code if value == "Unknown" else f"{code}: {value}"
 
 
@@ -165,20 +156,15 @@ def _normalize_value_text(value: str) -> str:
 
 def _short_option_text(value: str, max_len: int = 70) -> str:
     """A compact identifier for a dropdown's closed/list view. A full
-    Range description (Start/Span/Resolution/MDL/Accuracy all joined
-    together) is easily 100+ characters -- far wider than the dropdown
-    itself, so it read as cut off. The full text is always shown
-    separately once a real choice is made (see the segment loop below),
-    so nothing is actually lost by shortening it here.
+    Range description (Start/Span/Resolution/MDL/Accuracy joined
+    together) is easily 100+ characters, far wider than the dropdown --
+    the full text is always shown separately once a real choice is made,
+    so nothing is lost by shortening it here.
 
     For a Range-shaped value (has a "Span:" figure), reuses
-    ConcentrationRange's own "0 to 2,000 ppm (0% to 0.5% v/v)" formatting
-    -- the exact same rendering AURIGA's Range Full Scale already gets
-    (AURIGA's registry entry stores a real ConcentrationRange; FIXaHY-
-    4220MA/PORTaHY's Range tables get parsed into plain text instead, see
-    registry_builder._parse_selectable_table) -- so every product's Range
-    dropdown reads the same way rather than each looking different
-    depending on which extraction path happened to produce its data."""
+    ConcentrationRange's own "0 to 2,000 ppm (0% to 0.5% v/v)" formatting,
+    so every product's Range dropdown reads the same way regardless of
+    which extraction path produced its data."""
     normalized = _normalize_value_text(value)
     m = _SPAN_RE.search(normalized)
     if m:
@@ -223,11 +209,9 @@ def render_requirements_page() -> None:
     st.title("Customer Requirement Capture")
     st.caption("Capture a customer's technical requirements for a clean handoff to production.")
 
-    # Customer Name/Company now come from the deal picker, not a form
-    # field -- see the Customer Name/Company columns removed below. This
-    # links every requirement submission to a specific deal (deals.db),
-    # the same identity Pre-Call Discovery already uses, instead of a
-    # standalone, unlinked record each time.
+    # Customer Name/Company come from the deal picker, not a form field --
+    # links every submission to a specific deal instead of a standalone,
+    # unlinked record each time.
     deal_id, customer_name, company, _deal_use_case = render_deal_picker("requirements")
 
     # Everything below needs an active deal to attach to.
@@ -257,27 +241,18 @@ def render_requirements_page() -> None:
         hazard_zone = st.radio("Zone", ["Zone 0", "Zone 1", "Zone 2"], horizontal=True)
 
     # Every real, multi-option nomenclature choice for the selected
-    # product becomes its own question below -- e.g. VISION H2 LD's
-    # Output Signal, PORTaHY's Range Full Scale, FIXaHY 4220MA's Range/
-    # Background/Internal Code, each with the exact documented options.
-    # A segment documenting a bare numeric code range (e.g. 4220MA's
-    # Industry: "01 to 50") is ALSO a real, selectable choice -- just one
-    # whose individual codes aren't each individually named -- expanded
-    # into one option per code so it gets its own dropdown too, not
-    # hidden as if it were a single fixed spec. Only a segment with a
-    # genuinely single, non-range value (e.g. Enclosure is always
-    # "04: LM6 Die Cast") isn't a real decision -- shown as read-only
-    # context instead of a pointless one-option dropdown.
+    # product becomes its own question below. A bare numeric code range
+    # (e.g. "Industry: 01 to 50") is also a real selectable choice, just
+    # expanded into one option per code so it isn't hidden as a single
+    # fixed spec. Only a genuinely single, non-range value isn't a real
+    # decision -- shown as read-only context instead.
     choosable_segments: list[tuple[str, str, dict[str, str]]] = []
     fixed_segments: list[tuple[str, str]] = []
     if selected_product is not None:
         for seg_code, label, display in _selectable_segments(selected_product.nomenclature):
-            # Hidden or edited via Admin -- see
-            # product_field_overrides.is_nomenclature_label_hidden_or_edited.
-            # Hidden means suppressed everywhere; edited means it's
-            # rendered further down instead (with the admin's own
-            # options), via effective_additional_params, not as an
-            # ordering-code dropdown here.
+            # Hidden or edited via Admin -- hidden means suppressed
+            # everywhere; edited means it renders further down instead,
+            # via effective_additional_params, not as a dropdown here.
             if product_field_overrides.is_nomenclature_label_hidden_or_edited(
                 selected_product.product_name, label
             ):
@@ -289,23 +264,19 @@ def render_requirements_page() -> None:
                 code_range = _numeric_code_range(only_value)
                 if code_range:
                     low, high, width = code_range
-                    # "Unknown" (not a real description) so it renders as
-                    # a bare code via _format_option, same as a segment
-                    # option the catalogue lists but never explains (e.g.
-                    # Internal Code G/P/E) -- these codes genuinely have
-                    # no individual meaning documented, just like those.
+                    # "Unknown" so it renders as a bare code via
+                    # _format_option -- these codes have no individual
+                    # meaning documented.
                     expanded = {f"{n:0{width}d}": "Unknown" for n in range(low, high + 1)}
                     choosable_segments.append((seg_code, label, expanded))
                 else:
                     fixed_segments.append((label, only_value))
 
-    # The product itself determines Fixed vs Portable -- it's not
-    # something a customer configures at order time (there's no ordering
-    # code for it, unlike Range/Background/etc.), so once a product with
-    # a documented install_type is picked, this is a fact to show, not a
-    # question to ask. Falls back to asking only when the product's
-    # install_type isn't documented (e.g. FIXaHY Analyzer Series -- see
-    # data/product_registry.json) or no product is selected yet.
+    # The product itself determines Fixed vs Portable -- not something a
+    # customer configures at order time, so once a product with a
+    # documented install_type is picked, this is a fact to show, not a
+    # question to ask. Falls back to asking only when install_type isn't
+    # documented or no product is selected yet.
     product_install_type = (
         selected_product.install_type
         if selected_product is not None and selected_product.install_type in ("Fixed", "Portable")
@@ -323,16 +294,10 @@ def render_requirements_page() -> None:
         if not choosable_segments and not fixed_segments:
             st.caption(f"No documented ordering options are available for {product_choice}.")
 
-    # One dropdown per real ordering choice the selected product has --
-    # e.g. "Select Output Signal" for VISION H2 LD, with its exact
-    # documented codes ("V - Analogue Voltage Output", ...), always
-    # including a not-known fallback so a rep isn't forced to guess what
-    # the customer hasn't decided yet. Grounded in the Product Index, not
-    # admin-editable here -- see the module docstring. Kept outside the
-    # form and right next to the fixed-specs expander above, not buried
-    # among the generic questions below, so it isn't mistaken for missing
-    # when a rep is looking for a specific product's own ordering code
-    # (e.g. FIXaHY 4220MA's "Select Industry").
+    # One dropdown per real ordering choice, with its exact documented
+    # codes plus a not-known fallback so a rep isn't forced to guess.
+    # Kept outside the form, next to the fixed-specs expander above, not
+    # buried among the generic questions below.
     segment_selections: dict[str, str] = {}
     segment_summaries: list[str] = []
     if choosable_segments:
@@ -359,17 +324,11 @@ def render_requirements_page() -> None:
                     st.caption(f"**{label} {code}**: {_normalize_value_text(value)}")
 
     # Selectable specs the product documents with their own "Selectable
-    # <X>" table but that have NO position in its ordering-code suffix
-    # at all -- e.g. VISION H2 LD's Range/Background Gas/Compatible
-    # Interfaces/Connector Option (only Output Signal is actually part
-    # of its order code). Same rendering treatment as the ordering
-    # options above, appended into the same segment_summaries list so
-    # they flow into the saved requirement the same way -- kept as a
-    # clearly separate block, though, so a product where a label like
-    # "Range" happens to be a REAL ordering-code segment never shows it
-    # twice: the registry guarantees a label appears in nomenclature
-    # (-> choosable_segments, above) XOR additional_selectable_parameters
-    # (-> here), never both, for the same product.
+    # <X>" table but with NO position in its ordering-code suffix at all.
+    # Same rendering treatment as the ordering options above, appended
+    # into the same segment_summaries list -- kept a separate block since
+    # the registry guarantees a label appears in nomenclature XOR
+    # additional_selectable_parameters, never both.
     additional_params = (
         product_field_overrides.effective_additional_params(selected_product)
         if selected_product is not None else {}
@@ -418,11 +377,10 @@ def render_requirements_page() -> None:
                     segment_summaries.append(f"{label}: {value}")
 
     # Every generic (non-nomenclature) question below is admin-editable
-    # from the "Customer Requirements" tab in Admin (label, options,
-    # required, visible) -- see app.requirements_fields. Customer Name and
-    # Company stay always-shown regardless of their "visible" setting: the
-    # save validation below requires both, and requirements_store.py's
-    # database columns are NOT NULL for them.
+    # from the "Customer Requirements" tab in Admin (see
+    # app.requirements_fields). Customer Name/Company stay always-shown
+    # regardless of "visible", since save validation requires both and
+    # requirements_store.py's columns are NOT NULL for them.
     fcfg = field_map()
 
     def _visible(key: str) -> bool:
@@ -450,11 +408,9 @@ def render_requirements_page() -> None:
             if _visible("application_details") else ""
         )
 
-        # Fixed vs Portable is a fact about the selected product (shown
-        # above, in its fixed specifications), not a customer choice --
-        # only asked here as a fallback when the product's install_type
-        # isn't documented (see product_install_type above) or no product
-        # is selected yet.
+        # Fixed vs Portable is a fact about the selected product, not a
+        # customer choice -- only asked here as a fallback when
+        # install_type isn't documented or no product is selected yet.
         if product_install_type:
             install_type = product_install_type
             num_detectors = st.number_input(
