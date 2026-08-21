@@ -20,6 +20,7 @@ connections across sessions/reruns.
 from __future__ import annotations
 
 import os
+import time
 from contextlib import contextmanager
 from typing import Any, Iterator, Optional
 
@@ -87,9 +88,9 @@ def _get_pool() -> ConnectionPool:
                 url,
                 min_size=1,
                 max_size=5,
-                kwargs={"row_factory": dict_row, "connect_timeout": 20},
+                kwargs={"row_factory": dict_row, "connect_timeout": 12},
                 open=True,
-                timeout=25,
+                timeout=15,
                 check=ConnectionPool.check_connection,
                 max_idle=240,
             )
@@ -98,27 +99,56 @@ def _get_pool() -> ConnectionPool:
     return _pool
 
 
+# How many times to retry actually borrowing/using a connection before
+# giving up -- separate from the pool's own internal connect_timeout,
+# this covers the case where Neon's compute is mid-wake-up and needs a
+# second attempt a moment later rather than one long wait. Kept small:
+# each attempt can itself take up to the pool's own timeout (15s), so
+# 2 attempts already means a genuinely broken connection takes up to
+# ~33s to fail rather than hanging indefinitely -- long enough to ride
+# out a real wake-up, short enough not to leave a user staring at a
+# blank page for over a minute.
+_CONNECT_RETRY_ATTEMPTS = 2
+_CONNECT_RETRY_DELAY_SECONDS = 3
+
+
 @contextmanager
 def get_connection() -> Iterator[psycopg.Connection]:
     """Borrows a connection from the pool, committed on clean exit, rolled
     back and re-raised as DatabaseUnavailableError on failure. The
     connection returns to the pool afterward rather than closing, so the
-    next call can reuse it."""
-    pool = _get_pool()
-    try:
-        with pool.connection() as conn:
-            try:
-                yield conn
-                conn.commit()
-            except Exception as e:
-                conn.rollback()
-                if isinstance(e, DatabaseUnavailableError):
-                    raise
-                raise DatabaseUnavailableError(f"Database operation failed: {e}") from e
-    except DatabaseUnavailableError:
-        raise
-    except Exception as e:
-        raise DatabaseUnavailableError(f"Could not connect to the Postgres database: {e}") from e
+    next call can reuse it.
+
+    Retries a few times before giving up -- Neon's free tier suspends its
+    compute after inactivity, and waking it back up can occasionally take
+    longer than a single connection attempt allows for. A transient
+    failure here should read as "wait and try again," not "the database
+    is gone," so a caller only sees DatabaseUnavailableError once every
+    retry has failed too."""
+    last_error: Optional[Exception] = None
+    for attempt in range(_CONNECT_RETRY_ATTEMPTS):
+        if attempt > 0:
+            time.sleep(_CONNECT_RETRY_DELAY_SECONDS)
+        try:
+            pool = _get_pool()
+            with pool.connection() as conn:
+                try:
+                    yield conn
+                    conn.commit()
+                except Exception as e:
+                    conn.rollback()
+                    raise DatabaseUnavailableError(f"Database operation failed: {e}") from e
+            return
+        except DatabaseUnavailableError:
+            # A query/commit against a live connection failed for its own
+            # reason (bad SQL, a constraint, etc.) -- retrying won't help.
+            raise
+        except Exception as e:
+            last_error = e
+
+    raise DatabaseUnavailableError(
+        f"Could not connect to the Postgres database after {_CONNECT_RETRY_ATTEMPTS} attempts: {last_error}"
+    ) from last_error
 
 
 def execute(sql: str, params: tuple = ()) -> None:
