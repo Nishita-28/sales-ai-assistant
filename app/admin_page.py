@@ -137,40 +137,56 @@ def _confirm_remove_dialog(doc_path: Path) -> None:
     )
     col1, col2 = st.columns(2)
     if col1.button("Remove", type="primary", width="stretch"):
-        # Fires the instant the button is clicked, before any of the work
-        # below -- st.rerun() doesn't complete instantly (a DB write or two,
-        # then a full page reload), and with nothing else changing on
-        # screen in that window, an admin can't tell the click registered
-        # and clicks again. The toast is the only thing here guaranteed to
-        # render immediately.
-        st.toast(f"Removing {doc_path.name}...", icon="⏳")
-
-        # doc_path won't exist if this is a second click racing the first
-        # one's own rerun -- treat that as already handled instead of
-        # crashing on shutil.move(a file that's already gone).
-        if doc_path.exists():
-            # The file move + type removal are near-instant, so they happen
-            # right here -- the document disappears from "Current
-            # documents" immediately. The slow part (removing it from the
-            # vector index, then a full registry rebuild) runs on a
-            # background thread instead (see app.background_jobs), so this
-            # dialog can close immediately rather than sitting on a
-            # blocking spinner.
-            REMOVED_DOCS_DIR.mkdir(parents=True, exist_ok=True)
-            doc_name = doc_path.name
-            shutil.move(str(doc_path), str(REMOVED_DOCS_DIR / doc_name))
-            remove_document_type(doc_name)
-            if is_postgres_enabled():
-                delete_document_bytes(doc_name)
-
-            def _finish_removal(doc_name: str = doc_name) -> None:
-                remove_document_from_index(doc_name)
-                rebuild_product_registry(APPROVED_DOCS_DIR)
-
-            start_job(f"remove-{doc_name}", doc_name, _finish_removal)
+        # Deliberately does nothing else here -- st.dialog has a known
+        # issue (streamlit/streamlit#9405) where it doesn't reliably close
+        # if any work happens before st.rerun(), even fast work, leaving
+        # the dialog visibly stuck open. Setting a flag and rerunning
+        # immediately is the workaround: the actual removal happens
+        # outside the dialog, at the top of _render_documents_tab, on the
+        # next run -- by which point this function isn't called again, so
+        # the dialog closes cleanly.
+        st.session_state.pending_doc_removal = str(doc_path)
         st.rerun()
     if col2.button("Cancel", width="stretch"):
         st.rerun()
+
+
+def _process_pending_doc_removal() -> None:
+    """Runs the actual removal queued by _confirm_remove_dialog's Remove
+    button, outside the dialog (see that function's comment for why)."""
+    pending = st.session_state.pop("pending_doc_removal", None)
+    if pending is None:
+        return
+    doc_path = Path(pending)
+    st.toast(f"Removing {doc_path.name}...", icon="⏳")
+
+    # doc_path may already be gone (e.g. this ran twice somehow) --
+    # treat that as already handled instead of crashing on shutil.move.
+    if not doc_path.exists():
+        return
+
+    # Only the file move stays synchronous -- it's local disk, effectively
+    # instant, and it's what makes the document disappear from "Current
+    # documents" immediately. Everything else that touches the database or
+    # the vector index (type removal, stored bytes, index removal, registry
+    # rebuild) moves to the background job too, even though type/bytes
+    # removal alone would usually be fast -- st.dialog's known close-delay
+    # bug (see _confirm_remove_dialog's comment) means ANY work still done
+    # synchronously here directly adds to how long the dialog stays open,
+    # so keeping this path to just the move keeps that close as fast as
+    # possible.
+    REMOVED_DOCS_DIR.mkdir(parents=True, exist_ok=True)
+    doc_name = doc_path.name
+    shutil.move(str(doc_path), str(REMOVED_DOCS_DIR / doc_name))
+
+    def _finish_removal(doc_name: str = doc_name) -> None:
+        remove_document_type(doc_name)
+        if is_postgres_enabled():
+            delete_document_bytes(doc_name)
+        remove_document_from_index(doc_name)
+        rebuild_product_registry(APPROVED_DOCS_DIR)
+
+    start_job(f"remove-{doc_name}", doc_name, _finish_removal)
 
 
 _TYPE_HELP = {
@@ -276,6 +292,7 @@ def _rebuild_after_rename() -> bool:
 
 
 def _render_documents_tab() -> None:
+    _process_pending_doc_removal()
     _render_removal_in_progress_banner()
     _render_rebuild_status()
     _render_upload_result()
@@ -715,22 +732,32 @@ def _confirm_clear_feedback_dialog(cutoff_date: Optional[str]) -> None:
         )
     col1, col2 = st.columns(2)
     if col1.button("Delete", type="primary", width="stretch", disabled=count == 0):
-        # Fires immediately, before start_job()/st.rerun() -- the only
-        # thing guaranteed to render before the dialog closes, so a click
-        # doesn't look like it did nothing (see the same fix on document
-        # removal's Remove button for why that matters).
-        st.toast("Clearing feedback data...", icon="⏳")
-        # Runs on a background thread (see app.background_jobs), same
-        # pattern as document removal -- a large feedback table can take a
-        # while to delete, and the admin shouldn't be stuck on a blocking
-        # spinner for it.
-        if cutoff_date:
-            start_job("clear-feedback", "feedback data", lambda: clear_feedback_before(cutoff_date))
-        else:
-            start_job("clear-feedback", "feedback data", clear_all_feedback)
+        # Deliberately does nothing else here -- same st.dialog workaround
+        # as _confirm_remove_dialog (see its comment): st.dialog doesn't
+        # reliably close if any work happens before st.rerun(). The actual
+        # clear happens outside the dialog, at the top of
+        # _render_feedback_tab, on the next run.
+        st.session_state.pending_feedback_clear = {"cutoff_date": cutoff_date}
         st.rerun()
     if col2.button("Cancel", width="stretch"):
         st.rerun()
+
+
+def _process_pending_feedback_clear() -> None:
+    """Runs the actual clear queued by _confirm_clear_feedback_dialog's
+    Delete button, outside the dialog (see that function's comment)."""
+    pending = st.session_state.pop("pending_feedback_clear", None)
+    if pending is None:
+        return
+    st.toast("Clearing feedback data...", icon="⏳")
+    # Runs on a background thread (see app.background_jobs), same pattern
+    # as document removal -- a large feedback table can take a while to
+    # delete, and the admin shouldn't be stuck on a blocking spinner.
+    cutoff_date = pending["cutoff_date"]
+    if cutoff_date:
+        start_job("clear-feedback", "feedback data", lambda: clear_feedback_before(cutoff_date))
+    else:
+        start_job("clear-feedback", "feedback data", clear_all_feedback)
 
 
 def _render_feedback_clear_in_progress_banner() -> None:
@@ -789,6 +816,7 @@ def _render_feedback_data_management() -> None:
 
 
 def _render_feedback_tab() -> None:
+    _process_pending_feedback_clear()
     _render_feedback_clear_in_progress_banner()
     _render_accuracy_section()
     _render_feedback_data_management()
