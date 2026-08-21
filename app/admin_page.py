@@ -137,24 +137,37 @@ def _confirm_remove_dialog(doc_path: Path) -> None:
     )
     col1, col2 = st.columns(2)
     if col1.button("Remove", type="primary", width="stretch"):
-        # The file move + type removal are near-instant, so they happen right
-        # here -- the document disappears from "Current documents"
-        # immediately. The slow part (removing it from the vector index,
-        # then a full registry rebuild) runs on a background thread instead
-        # (see app.background_jobs), so this dialog can close immediately
-        # rather than sitting on a blocking spinner.
-        REMOVED_DOCS_DIR.mkdir(parents=True, exist_ok=True)
-        doc_name = doc_path.name
-        shutil.move(str(doc_path), str(REMOVED_DOCS_DIR / doc_name))
-        remove_document_type(doc_name)
-        if is_postgres_enabled():
-            delete_document_bytes(doc_name)
+        # Fires the instant the button is clicked, before any of the work
+        # below -- st.rerun() doesn't complete instantly (a DB write or two,
+        # then a full page reload), and with nothing else changing on
+        # screen in that window, an admin can't tell the click registered
+        # and clicks again. The toast is the only thing here guaranteed to
+        # render immediately.
+        st.toast(f"Removing {doc_path.name}...", icon="⏳")
 
-        def _finish_removal(doc_name: str = doc_name) -> None:
-            remove_document_from_index(doc_name)
-            rebuild_product_registry(APPROVED_DOCS_DIR)
+        # doc_path won't exist if this is a second click racing the first
+        # one's own rerun -- treat that as already handled instead of
+        # crashing on shutil.move(a file that's already gone).
+        if doc_path.exists():
+            # The file move + type removal are near-instant, so they happen
+            # right here -- the document disappears from "Current
+            # documents" immediately. The slow part (removing it from the
+            # vector index, then a full registry rebuild) runs on a
+            # background thread instead (see app.background_jobs), so this
+            # dialog can close immediately rather than sitting on a
+            # blocking spinner.
+            REMOVED_DOCS_DIR.mkdir(parents=True, exist_ok=True)
+            doc_name = doc_path.name
+            shutil.move(str(doc_path), str(REMOVED_DOCS_DIR / doc_name))
+            remove_document_type(doc_name)
+            if is_postgres_enabled():
+                delete_document_bytes(doc_name)
 
-        start_job(f"remove-{doc_name}", doc_name, _finish_removal)
+            def _finish_removal(doc_name: str = doc_name) -> None:
+                remove_document_from_index(doc_name)
+                rebuild_product_registry(APPROVED_DOCS_DIR)
+
+            start_job(f"remove-{doc_name}", doc_name, _finish_removal)
         st.rerun()
     if col2.button("Cancel", width="stretch"):
         st.rerun()
@@ -702,6 +715,11 @@ def _confirm_clear_feedback_dialog(cutoff_date: Optional[str]) -> None:
         )
     col1, col2 = st.columns(2)
     if col1.button("Delete", type="primary", width="stretch", disabled=count == 0):
+        # Fires immediately, before start_job()/st.rerun() -- the only
+        # thing guaranteed to render before the dialog closes, so a click
+        # doesn't look like it did nothing (see the same fix on document
+        # removal's Remove button for why that matters).
+        st.toast("Clearing feedback data...", icon="⏳")
         # Runs on a background thread (see app.background_jobs), same
         # pattern as document removal -- a large feedback table can take a
         # while to delete, and the admin shouldn't be stuck on a blocking
