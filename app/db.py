@@ -67,7 +67,16 @@ def _get_pool() -> ConnectionPool:
     Neon's own pooled endpoint) -- with several queries per page render,
     that overhead dominates page-load time. Reusing pooled connections
     across calls avoids paying it more than once per connection's
-    lifetime."""
+    lifetime.
+
+    check=ConnectionPool.check_connection pings a connection before handing
+    it out and transparently replaces it if that fails -- Neon's free tier
+    suspends its compute after 5 minutes of no activity, which silently
+    kills any connection sitting idle in the pool; without this check, the
+    pool hands that dead connection straight to the caller instead of a
+    live one. max_idle is set below Neon's own suspend window for the same
+    reason: a connection recycled at 4 minutes never survives long enough
+    idle to be the one Neon killed."""
     global _pool
     if _pool is None:
         url = get_database_url()
@@ -81,6 +90,8 @@ def _get_pool() -> ConnectionPool:
                 kwargs={"row_factory": dict_row, "connect_timeout": 20},
                 open=True,
                 timeout=25,
+                check=ConnectionPool.check_connection,
+                max_idle=240,
             )
         except Exception as e:
             raise DatabaseUnavailableError(f"Could not connect to the Postgres database: {e}") from e
@@ -244,6 +255,14 @@ CREATE TABLE IF NOT EXISTS document_types (
 CREATE TABLE IF NOT EXISTS product_field_overrides (
     product_name TEXT PRIMARY KEY,
     data JSONB NOT NULL
+);
+
+-- Admin correction of a document's auto-assigned product name, keyed by
+-- the document filename (the auto-assigned name itself isn't stable
+-- enough to key off -- see app.product_name_overrides).
+CREATE TABLE IF NOT EXISTS product_name_overrides (
+    document_name TEXT PRIMARY KEY,
+    product_name TEXT NOT NULL
 );
 
 -- The full requirements_fields.json list -- a single row.
