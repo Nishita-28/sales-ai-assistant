@@ -116,6 +116,25 @@ _CONNECT_RETRY_ATTEMPTS = 5
 _CONNECT_RETRY_DELAY_SECONDS = 5
 
 
+def _discard_pool() -> None:
+    """Closes and drops the current pool so the next _get_pool() call
+    builds a genuinely new one -- a failed connection attempt might mean
+    one bad connection (already handled by check=ConnectionPool.
+    check_connection), or it might mean the pool object itself is in a
+    bad state (its background workers wedged, its own reconnect budget
+    exhausted); retrying against the same pool object can't distinguish
+    those, so a failure discards it rather than assuming it's still
+    healthy."""
+    global _pool, _schema_ensured
+    if _pool is not None:
+        try:
+            _pool.close()
+        except Exception:
+            pass
+        _pool = None
+        _schema_ensured = False
+
+
 @contextmanager
 def get_connection() -> Iterator[psycopg.Connection]:
     """Borrows a connection from the pool, committed on clean exit, rolled
@@ -128,7 +147,10 @@ def get_connection() -> Iterator[psycopg.Connection]:
     longer than a single connection attempt allows for. A transient
     failure here should read as "wait and try again," not "the database
     is gone," so a caller only sees DatabaseUnavailableError once every
-    retry has failed too."""
+    retry has failed too. Each failed attempt discards the pool first
+    (see _discard_pool), so a retry is a genuinely fresh connection
+    attempt, not another request to a pool that may itself be the
+    problem."""
     last_error: Optional[Exception] = None
     for attempt in range(_CONNECT_RETRY_ATTEMPTS):
         if attempt > 0:
@@ -149,6 +171,7 @@ def get_connection() -> Iterator[psycopg.Connection]:
             raise
         except Exception as e:
             last_error = e
+            _discard_pool()
 
     raise DatabaseUnavailableError(
         f"Could not connect to the Postgres database after {_CONNECT_RETRY_ATTEMPTS} attempts: {last_error}"

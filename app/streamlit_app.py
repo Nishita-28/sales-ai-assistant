@@ -7,6 +7,7 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 import streamlit as st
@@ -23,7 +24,7 @@ from app import theme
 from app.admin_page import render_admin_page
 from app.background_jobs import get_active_jobs
 from app.claim_checker import warm_up as warm_up_claim_checker
-from app.db import is_postgres_enabled
+from app.db import DatabaseUnavailableError, is_postgres_enabled
 from app.discovery_page import render_discovery_page
 from app.document_storage import sync_local_docs_from_postgres
 from app.feedback_store import record_feedback
@@ -547,4 +548,35 @@ if theme.is_enterprise_theme():
 elif st.session_state.admin_authenticated:
     pages.append(st.Page(render_admin_page, title="Admin", icon=icon_admin))
 
-st.navigation(pages).run()
+# A DatabaseUnavailableError reaching here means db.get_connection()'s own
+# retries (see app/db.py) already failed several times over -- rather than
+# let Streamlit's default handler show a raw traceback (confusing and
+# alarming to anyone but a developer, and the actual cause is usually
+# transient: Neon mid-wake-up), auto-retry the whole page render a couple
+# more times with a plain "reconnecting" message first. Session-scoped
+# counter so a genuinely persistent outage still surfaces a real error
+# after a bounded number of attempts, instead of silently reloading
+# forever.
+if "db_error_retries" not in st.session_state:
+    st.session_state.db_error_retries = 0
+
+_MAX_DB_ERROR_AUTO_RETRIES = 3
+
+try:
+    st.navigation(pages).run()
+    st.session_state.db_error_retries = 0
+except DatabaseUnavailableError as e:
+    st.session_state.db_error_retries += 1
+    if st.session_state.db_error_retries <= _MAX_DB_ERROR_AUTO_RETRIES:
+        with st.spinner("Reconnecting to the database..."):
+            time.sleep(5)
+        st.rerun()
+    else:
+        st.session_state.db_error_retries = 0
+        st.error(
+            "Couldn't reach the database after several attempts. This is "
+            "usually temporary -- please refresh the page in a minute. If "
+            "it keeps happening, let an admin know."
+        )
+        with st.expander("Technical detail"):
+            st.code(str(e))
