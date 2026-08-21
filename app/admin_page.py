@@ -702,13 +702,36 @@ def _confirm_clear_feedback_dialog(cutoff_date: Optional[str]) -> None:
         )
     col1, col2 = st.columns(2)
     if col1.button("Delete", type="primary", width="stretch", disabled=count == 0):
+        # Runs on a background thread (see app.background_jobs), same
+        # pattern as document removal -- a large feedback table can take a
+        # while to delete, and the admin shouldn't be stuck on a blocking
+        # spinner for it.
         if cutoff_date:
-            clear_feedback_before(cutoff_date)
+            start_job("clear-feedback", "feedback data", lambda: clear_feedback_before(cutoff_date))
         else:
-            clear_all_feedback()
+            start_job("clear-feedback", "feedback data", clear_all_feedback)
         st.rerun()
     if col2.button("Cancel", width="stretch"):
         st.rerun()
+
+
+def _render_feedback_clear_in_progress_banner() -> None:
+    """Same loud, hard-to-miss treatment as _render_removal_in_progress_
+    banner for an in-flight feedback-clear job."""
+    for job in get_active_jobs():
+        if not job.job_id.startswith("clear-feedback"):
+            continue
+        if job.status == "running":
+            elapsed = int(time.time() - job.started_at)
+            st.warning(
+                f"⏳ Clearing **{job.label}** ({elapsed}s so far). Stay on this tab or "
+                "check back shortly; it'll update automatically.",
+                icon="⏳",
+            )
+        elif job.status == "error":
+            st.error(f"Failed to clear **{job.label}**: {job.error}")
+        else:
+            st.success(f"Cleared **{job.label}**.")
 
 
 def _render_feedback_data_management() -> None:
@@ -748,6 +771,7 @@ def _render_feedback_data_management() -> None:
 
 
 def _render_feedback_tab() -> None:
+    _render_feedback_clear_in_progress_banner()
     _render_accuracy_section()
     _render_feedback_data_management()
 
