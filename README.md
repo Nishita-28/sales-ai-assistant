@@ -14,7 +14,7 @@ a deal's full history (requirements submitted, discovery run, sales aids generat
 
 ### Assistant
 Ask any product or application question and get an answer generated only from approved documents,
-with the source excerpts and a confidence level (High/Medium/Low) shown alongside it. Two answer
+with the source excerpts and a confidence level (High/Low) shown alongside it. Two answer
 paths run underneath it:
 - **Deterministic catalog lookups** -- "what products do you offer," "what's the resolution for
   PORTaHY at 5K," decoding an ordering code -- answered directly from an auto-extracted Product
