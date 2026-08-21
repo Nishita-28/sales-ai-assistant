@@ -14,4 +14,9 @@ jobs:
       - name: Ping the database
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: psql "$DATABASE_URL" -c "SELECT 1;"
+        # Trims accidental leading/trailing whitespace or a trailing newline
+        # from the secret's value -- psql rejects a URL with one baked in
+        # (e.g. "invalid sslmode value: \"require\n\"").
+        run: |
+          CLEAN_URL="$(printf '%s' "$DATABASE_URL" | tr -d '[:space:]')"
+          psql "$CLEAN_URL" -c "SELECT 1;"
