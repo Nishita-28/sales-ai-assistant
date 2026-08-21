@@ -88,9 +88,9 @@ def _get_pool() -> ConnectionPool:
                 url,
                 min_size=1,
                 max_size=5,
-                kwargs={"row_factory": dict_row, "connect_timeout": 12},
+                kwargs={"row_factory": dict_row, "connect_timeout": 10},
                 open=True,
-                timeout=15,
+                timeout=10,
                 check=ConnectionPool.check_connection,
                 max_idle=240,
             )
@@ -109,11 +109,13 @@ def _get_pool() -> ConnectionPool:
 # whole app for everyone, not just the one caller who hit the bad
 # connection, and if the real cause isn't transient (wrong credentials,
 # a deleted/suspended project), no amount of retrying fixes it anyway.
-# 5 attempts at up to the pool's own 15s timeout, 5s apart, bounds the
-# worst case around 90s -- comfortably past Neon's typical wake-up time
-# without leaving the app hung indefinitely on a genuinely dead database.
-_CONNECT_RETRY_ATTEMPTS = 5
-_CONNECT_RETRY_DELAY_SECONDS = 5
+# Kept deliberately tight (worst case ~36s: 3 attempts x up to the
+# pool's own 10s timeout, 3s apart) -- this is the ONLY retry layer,
+# not stacked under a second one at the caller level (see
+# streamlit_app.py's DatabaseUnavailableError handler, which does not
+# retry again itself, for why that matters).
+_CONNECT_RETRY_ATTEMPTS = 3
+_CONNECT_RETRY_DELAY_SECONDS = 3
 
 
 def _discard_pool() -> None:

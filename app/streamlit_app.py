@@ -549,34 +549,21 @@ elif st.session_state.admin_authenticated:
     pages.append(st.Page(render_admin_page, title="Admin", icon=icon_admin))
 
 # A DatabaseUnavailableError reaching here means db.get_connection()'s own
-# retries (see app/db.py) already failed several times over -- rather than
-# let Streamlit's default handler show a raw traceback (confusing and
-# alarming to anyone but a developer, and the actual cause is usually
-# transient: Neon mid-wake-up), auto-retry the whole page render a couple
-# more times with a plain "reconnecting" message first. Session-scoped
-# counter so a genuinely persistent outage still surfaces a real error
-# after a bounded number of attempts, instead of silently reloading
-# forever.
-if "db_error_retries" not in st.session_state:
-    st.session_state.db_error_retries = 0
-
-_MAX_DB_ERROR_AUTO_RETRIES = 3
-
+# retries (see app/db.py, ~90s worst case) already failed. Deliberately
+# does NOT retry again here -- an earlier version did, and stacking a
+# second multi-attempt retry loop on top of db.py's own compounded into a
+# multi-minute worst case, long enough to hit some other timeout (the
+# platform's, or the browser's) that kills the script from outside Python
+# entirely, bypassing this except block altogether. One retry layer, not
+# two: show the friendly message immediately instead of Streamlit's raw
+# traceback, and let the user's own refresh trigger db.py's retry again.
 try:
     st.navigation(pages).run()
-    st.session_state.db_error_retries = 0
 except DatabaseUnavailableError as e:
-    st.session_state.db_error_retries += 1
-    if st.session_state.db_error_retries <= _MAX_DB_ERROR_AUTO_RETRIES:
-        with st.spinner("Reconnecting to the database..."):
-            time.sleep(5)
-        st.rerun()
-    else:
-        st.session_state.db_error_retries = 0
-        st.error(
-            "Couldn't reach the database after several attempts. This is "
-            "usually temporary -- please refresh the page in a minute. If "
-            "it keeps happening, let an admin know."
-        )
-        with st.expander("Technical detail"):
-            st.code(str(e))
+    st.error(
+        "Couldn't reach the database right now. This is usually "
+        "temporary -- please refresh the page in a minute. If it keeps "
+        "happening, let an admin know."
+    )
+    with st.expander("Technical detail"):
+        st.code(str(e))
