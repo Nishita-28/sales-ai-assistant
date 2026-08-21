@@ -692,7 +692,7 @@ def _render_accuracy_section() -> None:
         chart_source = weekly.reset_index().rename(columns={"day": "period"})
         granularity = "weekly"
 
-    with st.container(border=theme.is_enterprise_theme()):
+    with st.container(border=True):
         st.markdown("**AI Accuracy Over Time**")
         if len(chart_source) < MIN_CHART_POINTS:
             st.caption(

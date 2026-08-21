@@ -10,7 +10,6 @@ import re
 import streamlit as st
 from docx import Document
 
-from app import theme
 from app.deal_picker import render_deal_picker, set_active_deal
 from app.deals_store import update_deal_fields
 from app.product_index import load_product_index
@@ -74,7 +73,7 @@ def render_sales_aid_page() -> None:
             try:
                 with st.spinner("Checking approved documents..."):
                     matches, text_stream = stream_sales_aid(use_case, compare_against, mnst_products=mnst_products)
-                with st.container(border=theme.is_enterprise_theme()):
+                with st.container(border=True):
                     raw_reply = st.write_stream(text_stream)
             except (RetrieverError, ResponseGeneratorError) as e:
                 st.error(f"Something went wrong generating the sales aid: {e}")
@@ -113,7 +112,7 @@ def render_sales_aid_page() -> None:
         for p in result.customer_priorities:
             st.markdown(f"- {p}")
 
-    with st.container(border=theme.is_enterprise_theme()):
+    with st.container(border=True):
         if result.title:
             st.subheader(result.title)
         if result.use_case_framing:

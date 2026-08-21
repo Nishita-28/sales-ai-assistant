@@ -118,7 +118,6 @@ Admin Documents tab so a bad extraction doesn't silently ship.
 | `REQUIRE_SOURCES` | No (default `true`) | If true, skip the LLM call entirely (return the no-source message) when retrieval finds nothing relevant. |
 | `ALLOW_CUSTOMER_FACING_OUTPUT` | No (default `false`) | Master switch for customer-facing wording/Sales Aids -- off by default regardless of the claim guardrail's own verdict. |
 | `VECTOR_DB_PATH` | No (default `data/chroma_index`) | Where the local Chroma index lives. |
-| `UI_THEME` | No (default `enterprise`) | `enterprise` (current dark theme + top-level Admin page) or `classic` (original layout). |
 
 ## Running it
 

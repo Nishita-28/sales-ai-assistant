@@ -12,7 +12,6 @@ import html
 
 import streamlit as st
 
-from app import theme
 from app.deal_picker import render_deal_picker, set_active_deal
 from app.deals_store import (
     get_deal,
@@ -56,14 +55,11 @@ OUTCOME_RENDER = {
 
 
 def _render_recommend_outcome(product: str) -> None:
-    """A "Recommend" outcome gets the app's own brand blue, not
-    Streamlit's default green st.success -- literal hex values (not the
-    theme.py CSS vars) so this still renders correctly under
-    UI_THEME=classic, where inject_theme() never runs and those vars
-    are undefined. The recommended product name (parsed separately from
-    the prose by discovery_generator's "Recommended Product:" section)
-    is shown right in the box, not left buried in the first sentence of
-    the paragraph below it."""
+    """A "Recommend" outcome gets the app's own brand blue, not Streamlit's
+    default green st.success. The recommended product name (parsed
+    separately from the prose by discovery_generator's "Recommended
+    Product:" section) is shown right in the box, not left buried in the
+    first sentence of the paragraph below it."""
     product_html = (
         f'<div style="margin-top:0.25rem;font-size:1.15rem;font-weight:700;">{html.escape(product)}</div>'
         if product
@@ -103,7 +99,7 @@ def _render_right_to_win_card(
     post-generation render (deal_id passed through, so answers save
     immediately), using the same `answers` dict and widget key scheme so a
     typed-ahead answer survives the switch between them."""
-    with st.container(border=theme.is_enterprise_theme()):
+    with st.container(border=True):
         st.markdown(f"**Right to Win #{i} -- {point.title}**")
 
         # Falls back to a truncated evidence snippet only if the model
@@ -135,8 +131,6 @@ def _render_right_to_win_card(
         if point.evidence:
             with st.expander("Why we think this"):
                 st.caption(point.evidence)
-    if not theme.is_enterprise_theme():
-        st.markdown("")
 
 
 def _save_qualification_answer(deal_id: int, field_key: str, widget_key: str) -> None:
@@ -151,7 +145,7 @@ def _save_qualification_answer(deal_id: int, field_key: str, widget_key: str) ->
 
 def _render_qualification_card(deal_id: int, q: QualificationQuestion) -> None:
     widget_key = f"qual-ans-{deal_id}-{q.field_key}"
-    with st.container(border=theme.is_enterprise_theme()):
+    with st.container(border=True):
         st.markdown(f"**{q.field_label}**")
         st.text_input(
             q.question,
@@ -161,8 +155,6 @@ def _render_qualification_card(deal_id: int, q: QualificationQuestion) -> None:
             args=(deal_id, q.field_key, widget_key),
         )
         st.caption(q.rationale)
-    if not theme.is_enterprise_theme():
-        st.markdown("")
 
 
 def _load_saved_recommendation(deal_id: int | None) -> RecommendationResult | None:
@@ -307,7 +299,7 @@ def render_discovery_page() -> None:
                         save_discovery(
                             deal_id, [p.to_dict() for p in completed_points], live_answers, sources
                         )
-                    with live_slot.container(border=theme.is_enterprise_theme()):
+                    with live_slot.container(border=True):
                         st.markdown(tail_text)
                 live_slot.empty()
             except (RetrieverError, ResponseGeneratorError) as e:
@@ -421,7 +413,7 @@ def render_discovery_page() -> None:
                     # somehow does.
                     recommendation = insufficient_recommendation(answered_count)
                 else:
-                    with st.container(border=theme.is_enterprise_theme()):
+                    with st.container(border=True):
                         raw_reply = st.write_stream(text_stream)
                     recommendation = finalize_recommendation(matches, qa_block, raw_reply)
             except (RetrieverError, ResponseGeneratorError) as e:

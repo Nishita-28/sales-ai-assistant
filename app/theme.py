@@ -1,40 +1,24 @@
-"""Enterprise UI theme for the Streamlit app.
-
-Toggleable via the UI_THEME env var so the redesign can be reverted
-instantly without touching any page's logic:
-  UI_THEME=enterprise (default) -- the navy-sidebar/card redesign.
-  UI_THEME=classic              -- the original look, exactly as before.
-
-Every page calls inject_theme() once; it's a no-op under "classic". Badge
-rendering is centralized here too, so all pages render confidence/risk
-pills consistently.
+"""Enterprise UI theme for the Streamlit app -- the navy-sidebar/card
+redesign, applied unconditionally. Badge rendering is centralized here too,
+so all pages render confidence/risk pills consistently.
 """
 from __future__ import annotations
 
 import base64
 import functools
-import os
 from pathlib import Path
 
 import streamlit as st
 
 ASSETS_DIR = Path(__file__).parent / "assets"
 
-UI_THEME = os.environ.get("UI_THEME", "enterprise").strip().lower()
-
-
-def is_enterprise_theme() -> bool:
-    return UI_THEME == "enterprise"
-
 
 def apply_native_theme_option() -> None:
-    """Sets Streamlit's own native theme options at runtime (no-op under
-    classic). Needed on top of inject_theme()'s CSS: canvas-rendered widgets
-    -- st.data_editor / st.dataframe (glide-data-grid) -- read colors from
-    Streamlit's native theme config, not the DOM, so CSS alone can't reach
-    them. Must run before st.set_page_config()."""
-    if not is_enterprise_theme():
-        return
+    """Sets Streamlit's own native theme options at runtime. Needed on top
+    of inject_theme()'s CSS: canvas-rendered widgets -- st.data_editor /
+    st.dataframe (glide-data-grid) -- read colors from Streamlit's native
+    theme config, not the DOM, so CSS alone can't reach them. Must run
+    before st.set_page_config()."""
     try:
         st._config.set_option("theme.primaryColor", "#184fa3")
         st._config.set_option("theme.backgroundColor", "#0a1730")
@@ -437,11 +421,7 @@ div:has(> [role="listbox"]) {{
 
 
 def inject_theme() -> None:
-    """Injects the enterprise theme CSS. No-op under UI_THEME=classic, so
-    reverting to the original look is a one-line env var change -- no
-    files to restore, no page logic touched."""
-    if not is_enterprise_theme():
-        return
+    """Injects the enterprise theme CSS."""
     css = _CSS.format(
         u400=_b64("ubuntu-400.ttf"), u500=_b64("ubuntu-500.ttf"), u700=_b64("ubuntu-700.ttf"),
         bg=background_url(),

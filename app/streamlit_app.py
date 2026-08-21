@@ -59,12 +59,12 @@ ADMIN_PASSWORD = get_admin_password()
 # ---------------------------------------------------------------------------
 # Page config
 # ---------------------------------------------------------------------------
-theme.apply_native_theme_option()  # no-op when UI_THEME=classic -- see app/theme.py
+theme.apply_native_theme_option()
 st.set_page_config(
     page_title="Internal AI Sales Assistant",
     layout="centered",
 )
-theme.inject_theme()  # no-op when UI_THEME=classic -- see app/theme.py
+theme.inject_theme()
 
 # ---------------------------------------------------------------------------
 # Cold-start sync from Neon -- Streamlit Community Cloud's filesystem is
@@ -129,17 +129,6 @@ SAMPLE_QUESTIONS = [
     "Can AURIGA be deployed in a hazardous area?",
 ]
 
-RISK_COLORS = {
-    "None": ("var(--bg-success, #EAF3DE)", "var(--text-success, #3B6D11)"),
-    "Certification": ("#FAEEDA", "#854F0B"),
-    "Accuracy": ("#FAEEDA", "#854F0B"),
-    "Safety": ("#FCEBEB", "#791F1F"),
-    "Pricing": ("#FAEEDA", "#854F0B"),
-    "Legal": ("#FCEBEB", "#791F1F"),
-    "Delivery": ("#FAEEDA", "#854F0B"),
-    "Unknown": ("#F1EFE8", "#444441"),
-}
-
 
 # ---------------------------------------------------------------------------
 # Copy-to-clipboard button (Streamlit has no native one)
@@ -168,7 +157,6 @@ def copy_button(text: str, label: str = "Copy answer", key: str = "", icon: bool
     # inside the double-quoted onclick="..." attribute.
     safe_text = html.escape(json.dumps(text))
     safe_label = html.escape(label)
-    # icon=False keeps the plain default; only enterprise call sites opt into the icon variant.
     label_html = f"{_COPY_ICON_SVG}{safe_label}" if icon else safe_label
     copied_html = f"{_CHECK_ICON_SVG}Copied" if icon else "Copied"
     safe_label_html = html.escape(json.dumps(label_html))
@@ -215,59 +203,28 @@ def _render_background_job_status() -> None:
 
 
 with st.sidebar:
-    if theme.is_enterprise_theme():
-        # Logo is positioned above the nav via CSS (see theme.py), since
-        # Streamlit's auto nav list is a DOM sibling that can't be
-        # interleaved with content from `with st.sidebar:`. Admin is a
-        # regular nav page here (see render_admin_gate below), so nothing
-        # admin-related renders in this sidebar block.
-        st.markdown(theme.render_logo_html(), unsafe_allow_html=True)
-        st.markdown(
-            f"""
-            <div class="mnst-status">
-              <div class="mnst-status-row"><span class="left"><span class="led"></span>Knowledge base</span><span class="val">{count_approved_docs()} docs</span></div>
-              <div class="mnst-status-row"><span class="left"><span class="led"></span>Claim guardrail</span><span class="val">ON</span></div>
-              <div class="mnst-status-row"><span class="left"><span class="led"></span>Mode</span><span class="val">Internal</span></div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        _render_background_job_status()
-    else:
-        st.subheader("Knowledge base")
-
-        st.markdown("**Status**")
-        st.success(f"Indexed docs: {count_approved_docs()}")
-        st.info("Claim guardrail: ON")
-        st.warning("Mode: Internal only")
-        _render_background_job_status()
-
-        with st.expander("Admin sign-in"):
-            if not ADMIN_PASSWORD:
-                st.error("ADMIN_PASSWORD is not set. Add it to secrets before deploying.")
-            elif st.session_state.admin_authenticated:
-                st.caption("Signed in as admin -- see the Admin page.")
-                if st.button("Sign out"):
-                    st.session_state.admin_authenticated = False
-                    st.rerun()
-            else:
-                with st.form("admin_login", clear_on_submit=True):
-                    entered_password = st.text_input("Admin password", type="password")
-                    submitted = st.form_submit_button("Unlock admin")
-                if submitted:
-                    if entered_password == ADMIN_PASSWORD:
-                        st.session_state.admin_authenticated = True
-                        st.rerun()
-                    else:
-                        st.error("Incorrect password.")
+    # Logo is positioned above the nav via CSS (see theme.py), since
+    # Streamlit's auto nav list is a DOM sibling that can't be
+    # interleaved with content from `with st.sidebar:`. Admin is a
+    # regular nav page (see render_admin_gate below), so nothing
+    # admin-related renders in this sidebar block.
+    st.markdown(theme.render_logo_html(), unsafe_allow_html=True)
+    st.markdown(
+        f"""
+        <div class="mnst-status">
+          <div class="mnst-status-row"><span class="left"><span class="led"></span>Knowledge base</span><span class="val">{count_approved_docs()} docs</span></div>
+          <div class="mnst-status-row"><span class="left"><span class="led"></span>Claim guardrail</span><span class="val">ON</span></div>
+          <div class="mnst-status-row"><span class="left"><span class="led"></span>Mode</span><span class="val">Internal</span></div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    _render_background_job_status()
 
 
 def render_admin_gate() -> None:
-    """Admin as a regular nav page (enterprise theme only): shows a
-    password form in the page content itself until unlocked, instead of a
-    sidebar expander. Under classic theme, Admin only appears in the nav
-    list once st.session_state.admin_authenticated is already True (see
-    pages list below)."""
+    """Admin as a regular nav page: shows a password form in the page
+    content itself until unlocked."""
     if st.session_state.admin_authenticated:
         render_admin_page()
         return
@@ -302,21 +259,13 @@ def _report_wrong_dialog(question: str, answer: str) -> None:
 # ---------------------------------------------------------------------------
 # Assistant page
 # ---------------------------------------------------------------------------
-def render_assistant_page() -> None:
-    if theme.is_enterprise_theme():
-        _render_assistant_page_enterprise()
-    else:
-        _render_assistant_page_classic()
-
-
 def _ask_and_record(question: str) -> None:
     """Runs one question through the pipeline and appends it to history.
-    Shared by both the classic and enterprise layouts. Streams the answer
-    live as it's generated, echoing the question first so the live text
-    doesn't appear with no visible prompt above it. Customer-facing wording
-    is generated on demand (see _render_customer_wording()), not eagerly
-    here, since most questions never need it and it roughly doubles
-    generation time."""
+    Streams the answer live as it's generated, echoing the question first
+    so the live text doesn't appear with no visible prompt above it.
+    Customer-facing wording is generated on demand (see
+    _render_customer_wording()), not eagerly here, since most questions
+    never need it and it roughly doubles generation time."""
     try:
         with st.spinner("Checking approved documents..."):
             retrieval, text_stream = stream_answer_question(question)
@@ -324,14 +273,9 @@ def _ask_and_record(question: str) -> None:
         st.error(f"Something went wrong answering that question: {e}")
         return
 
-    if theme.is_enterprise_theme():
-        st.divider()
-        st.markdown(f"**{question}**")
-        answer_wrapper = st.container(border=True)
-    else:
-        with st.chat_message("user"):
-            st.write(question)
-        answer_wrapper = st.chat_message("assistant")
+    st.divider()
+    st.markdown(f"**{question}**")
+    answer_wrapper = st.container(border=True)
 
     try:
         with answer_wrapper:
@@ -354,11 +298,10 @@ def _ask_and_record(question: str) -> None:
 
 
 def _render_customer_wording(turn: dict, key_prefix: str) -> None:
-    """Shared by both layouts: shows the blocked caption, a button to
-    generate customer-facing wording on demand, or the generated wording
-    once it exists. Mutates turn["customer_wording"] in place so it's
-    cached in st.session_state.history and not regenerated on every
-    rerun."""
+    """Shows the blocked caption, a button to generate customer-facing
+    wording on demand, or the generated wording once it exists. Mutates
+    turn["customer_wording"] in place so it's cached in
+    st.session_state.history and not regenerated on every rerun."""
     if turn["customer_wording_blocked"]:
         st.caption("Customer-facing wording blocked — escalate for review.")
         return
@@ -370,7 +313,7 @@ def _render_customer_wording(turn: dict, key_prefix: str) -> None:
                 turn["customer_wording"],
                 "Copy customer wording",
                 key=f"{key_prefix}-cust",
-                icon=theme.is_enterprise_theme(),
+                icon=True,
             )
         return
 
@@ -389,64 +332,7 @@ def _render_customer_wording(turn: dict, key_prefix: str) -> None:
         st.rerun()
 
 
-def _render_assistant_page_classic() -> None:
-    """The original layout, unchanged -- this is what UI_THEME=classic
-    restores. Do not edit this without also updating the "revert" story:
-    it exists specifically so reverting the enterprise redesign is a
-    one-line env var change, not a reconstruction from memory."""
-    st.title("Internal AI Sales Assistant")
-    st.caption("Answers only from approved company documents. Always shows sources and confidence.")
-
-    if not st.session_state.history:
-        st.markdown("**Try asking:**")
-        cols = st.columns(len(SAMPLE_QUESTIONS))
-        for col, q in zip(cols, SAMPLE_QUESTIONS):
-            if col.button(q, width="stretch"):
-                st.session_state.pending_question = q
-
-    for idx, turn in enumerate(st.session_state.history):
-        with st.chat_message("user"):
-            st.write(turn["question"])
-        with st.chat_message("assistant"):
-            bg, fg = RISK_COLORS.get(turn["risk"], RISK_COLORS["Unknown"])
-            badge_html = (
-                f'<span style="font-size:12px;padding:3px 10px;border-radius:6px;'
-                f'background:{bg};color:{fg};margin-right:6px;">Risk: {turn["risk"]}</span>'
-                f'<span style="font-size:12px;padding:3px 10px;border-radius:6px;'
-                f'background:#EAF3DE;color:#3B6D11;">Confidence: {turn["confidence"]}</span>'
-            )
-            st.markdown(badge_html, unsafe_allow_html=True)
-            st.write(turn["answer"])
-
-            with st.expander("Sources"):
-                for name in dict.fromkeys(name for name, _, _ in turn["sources"]):
-                    st.markdown(f"- `{name}`")
-
-            copy_button(turn["answer"], "Copy answer", key=f"ans-{idx}")
-
-            _render_customer_wording(turn, key_prefix=f"cust-{idx}")
-
-            fcol1, fcol2, fcol3 = st.columns(3)
-            if fcol1.button("Correct", key=f"ok-{idx}"):
-                record_feedback(turn["question"], turn["answer"], "correct")
-                st.toast("Thanks for the feedback!")
-            if fcol2.button("Wrong", key=f"bad-{idx}"):
-                _report_wrong_dialog(turn["question"], turn["answer"])
-            if fcol3.button("Unsafe", key=f"unsafe-{idx}"):
-                record_feedback(turn["question"], turn["answer"], "unsafe")
-                st.toast("Thanks for flagging this — reported for review.")
-
-    question = st.chat_input("Ask a sales or application question")
-    if "pending_question" in st.session_state:
-        question = st.session_state.pop("pending_question")
-    if question:
-        question = question.strip()
-
-    if question:
-        _ask_and_record(question)
-
-
-def _render_assistant_page_enterprise() -> None:
+def render_assistant_page() -> None:
     """Search-bar-at-top, answer-card-below layout -- deliberately not a
     chat thread. Most recent answer is shown first, like a search/report
     tool rather than an accumulating chat log."""
@@ -520,22 +406,13 @@ def _render_assistant_page_enterprise() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Navigation.
-# Enterprise theme: Admin is always a nav item; render_admin_gate shows a
-#   password form in-page until unlocked (see above). Icons use Streamlit's
-#   built-in Material Symbols instead of emoji.
-# Classic theme: Admin only appears in the nav list once the sidebar
-#   password gate (above) has already passed.
+# Navigation. Admin is always a nav item; render_admin_gate shows a
+# password form in-page until unlocked (see above).
 # ---------------------------------------------------------------------------
-if theme.is_enterprise_theme():
-    icon_assistant, icon_requirements, icon_discovery, icon_sales_aids, icon_admin = (
-        ":material/chat:", ":material/description:", ":material/travel_explore:",
-        ":material/article:", ":material/admin_panel_settings:",
-    )
-else:
-    icon_assistant, icon_requirements, icon_discovery, icon_sales_aids, icon_admin = (
-        "💬", "📋", "🧭", "📄", "🛠️",
-    )
+icon_assistant, icon_requirements, icon_discovery, icon_sales_aids, icon_admin = (
+    ":material/chat:", ":material/description:", ":material/travel_explore:",
+    ":material/article:", ":material/admin_panel_settings:",
+)
 
 def _friendly_error(e: Exception) -> None:
     st.error(
@@ -579,11 +456,8 @@ pages = [
     st.Page(_safe_page(render_requirements_page), title="Customer Requirements", icon=icon_requirements),
     st.Page(_safe_page(render_discovery_page), title="Discovery Questions", icon=icon_discovery),
     st.Page(_safe_page(render_sales_aid_page), title="Sales Aids", icon=icon_sales_aids),
+    st.Page(_safe_page(render_admin_gate), title="Admin", icon=icon_admin),
 ]
-if theme.is_enterprise_theme():
-    pages.append(st.Page(_safe_page(render_admin_gate), title="Admin", icon=icon_admin))
-elif st.session_state.admin_authenticated:
-    pages.append(st.Page(_safe_page(render_admin_page), title="Admin", icon=icon_admin))
 
 # Kept as a second, harmless layer of defense -- see _safe_page's docstring
 # for why this alone isn't enough to catch a page-level exception.
