@@ -4,6 +4,7 @@ it's ever reached without going through the sidebar gate first.
 """
 from __future__ import annotations
 
+import mimetypes
 import shutil
 import time
 from datetime import datetime
@@ -78,6 +79,18 @@ def _approved_doc_paths() -> list[Path]:
         for p in APPROVED_DOCS_DIR.iterdir()
         if p.is_file() and p.suffix.lower() in SUPPORTED_DOC_EXTENSIONS and not p.name.startswith("~$")
     )
+
+
+@st.cache_data(show_spinner=False)
+def _read_doc_bytes(path_str: str, mtime: float) -> bytes:
+    """Cached by (path, mtime) -- same keying idea as document_loader.
+    load_document's own cache. Documents tab re-renders on every admin-page
+    interaction (st.tabs() re-runs every tab's body, not just the active
+    one), so without this every click anywhere in Admin would re-read every
+    approved document's full bytes off disk just to keep the Download
+    button's data= argument populated. mtime in the key means a replaced
+    file is picked up automatically, no manual cache-clearing needed."""
+    return Path(path_str).read_bytes()
 
 
 def _render_rebuild_status() -> None:
@@ -366,10 +379,10 @@ def _render_documents_tab() -> None:
         size_kb = stat.st_size / 1024
         modified = datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M")
         current_type = get_document_type(doc_path.name)
-        # [3, 3, 1]: the Type column needs room for the longest options
+        # [3, 3, 1, 1]: the Type column needs room for the longest options
         # ("Golden Frameworks & Sales Tactics", "Competitive & Internal
         # Strategy") to stay readable once selected.
-        col1, col2, col3 = st.columns([3, 3, 1])
+        col1, col2, col3, col4 = st.columns([3, 3, 1, 1])
         with col1:
             st.markdown(f"**{doc_path.name}**")
             st.caption(f"{size_kb:.0f} KB · modified {modified}")
@@ -383,6 +396,15 @@ def _render_documents_tab() -> None:
                 set_document_type(doc_path.name, chosen)
                 st.rerun()
         with col3:
+            st.download_button(
+                "Download",
+                data=_read_doc_bytes(str(doc_path), stat.st_mtime),
+                file_name=doc_path.name,
+                mime=mimetypes.guess_type(doc_path.name)[0],
+                key=f"download-{doc_path.name}",
+                width="stretch",
+            )
+        with col4:
             if st.button("Remove", key=f"remove-{doc_path.name}", width="stretch"):
                 _confirm_remove_dialog(doc_path)
 
