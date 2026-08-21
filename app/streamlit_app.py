@@ -537,33 +537,57 @@ else:
         "💬", "📋", "🧭", "📄", "🛠️",
     )
 
+def _friendly_error(e: Exception) -> None:
+    st.error(
+        "Something went wrong loading this page -- please refresh. This is "
+        "usually temporary (the database waking back up after being idle). "
+        "If it keeps happening, let an admin know."
+    )
+    with st.expander("Technical detail"):
+        st.code(f"{type(e).__name__}: {e}")
+
+
+def _safe_page(render_fn):
+    """Wraps a page function so an uncaught exception shows a plain refresh
+    message instead of Streamlit's raw traceback. Needed because
+    st.navigation(pages).run() does not let an exception raised inside the
+    selected page function propagate out to a try/except wrapped around the
+    .run() call itself -- confirmed against a real DatabaseUnavailableError
+    in production, which reached Streamlit's own crash screen instead of the
+    try/except below (kept as a second, harmless layer of defense)."""
+
+    def wrapped() -> None:
+        try:
+            render_fn()
+        except DatabaseUnavailableError as e:
+            _friendly_error(e)
+        except Exception as e:  # noqa: BLE001 -- last resort, any page bug included
+            _friendly_error(e)
+
+    # st.Page infers each page's URL pathname from the callable's __name__
+    # when it isn't otherwise unique -- every wrapped() closure shares that
+    # same name by default, which made Streamlit see 5 identical pathnames
+    # and refuse to start at all (StreamlitAPIException: Multiple Pages
+    # specified with URL pathname wrapped). Restoring the original
+    # function's name keeps each page's pathname distinct.
+    wrapped.__name__ = render_fn.__name__
+    return wrapped
+
+
 pages = [
-    st.Page(render_assistant_page, title="Assistant", icon=icon_assistant, default=True),
-    st.Page(render_requirements_page, title="Customer Requirements", icon=icon_requirements),
-    st.Page(render_discovery_page, title="Discovery Questions", icon=icon_discovery),
-    st.Page(render_sales_aid_page, title="Sales Aids", icon=icon_sales_aids),
+    st.Page(_safe_page(render_assistant_page), title="Assistant", icon=icon_assistant, default=True),
+    st.Page(_safe_page(render_requirements_page), title="Customer Requirements", icon=icon_requirements),
+    st.Page(_safe_page(render_discovery_page), title="Discovery Questions", icon=icon_discovery),
+    st.Page(_safe_page(render_sales_aid_page), title="Sales Aids", icon=icon_sales_aids),
 ]
 if theme.is_enterprise_theme():
-    pages.append(st.Page(render_admin_gate, title="Admin", icon=icon_admin))
+    pages.append(st.Page(_safe_page(render_admin_gate), title="Admin", icon=icon_admin))
 elif st.session_state.admin_authenticated:
-    pages.append(st.Page(render_admin_page, title="Admin", icon=icon_admin))
+    pages.append(st.Page(_safe_page(render_admin_page), title="Admin", icon=icon_admin))
 
-# A DatabaseUnavailableError reaching here means db.get_connection()'s own
-# retries (see app/db.py, ~90s worst case) already failed. Deliberately
-# does NOT retry again here -- an earlier version did, and stacking a
-# second multi-attempt retry loop on top of db.py's own compounded into a
-# multi-minute worst case, long enough to hit some other timeout (the
-# platform's, or the browser's) that kills the script from outside Python
-# entirely, bypassing this except block altogether. One retry layer, not
-# two: show the friendly message immediately instead of Streamlit's raw
-# traceback, and let the user's own refresh trigger db.py's retry again.
+# Kept as a second, harmless layer of defense -- see _safe_page's docstring
+# for why this alone isn't enough to catch a page-level exception.
 try:
     st.navigation(pages).run()
 except DatabaseUnavailableError as e:
-    st.error(
-        "Couldn't reach the database right now. This is usually "
-        "temporary -- please refresh the page in a minute. If it keeps "
-        "happening, let an admin know."
-    )
-    with st.expander("Technical detail"):
-        st.code(str(e))
+    _friendly_error(e)
