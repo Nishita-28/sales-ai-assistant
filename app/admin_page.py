@@ -21,6 +21,7 @@ from app.deals_store import MEDDPICC_FIELDS, delete_deal, get_recommendation, li
 from app.document_storage import delete_document_bytes, save_document_bytes
 from app.document_types import (
     ALL_TYPES,
+    PRODUCT_CATALOGUE,
     get_document_type,
     remove_document_type,
     set_document_type,
@@ -36,7 +37,7 @@ from app.feedback_store import (
     recent_reports,
     resolve_feedback,
 )
-from app import product_field_overrides
+from app import product_field_overrides, product_name_overrides
 from app.concentration import ConcentrationRange
 from app.product_index import NomenclatureSegment, load_product_index
 from app.registry_builder import rebuild_product_registry
@@ -236,6 +237,31 @@ def _render_removal_in_progress_banner() -> None:
             st.success(f"Removed **{job.label}**.")
 
 
+def _migrate_product_field_overrides(old_name: str, new_name: str) -> None:
+    """Carries a product's field customizations over to its new name when
+    renaming -- otherwise they'd silently stop applying, keyed to a
+    product_name that no longer exists."""
+    overrides = product_field_overrides.load_overrides()
+    if old_name in overrides and new_name not in overrides:
+        overrides[new_name] = overrides.pop(old_name)
+        product_field_overrides.save_overrides(overrides)
+
+
+def _rebuild_after_rename() -> bool:
+    """Full reindex + registry rebuild -- a rename changes the product_name
+    baked into every one of that document's chunks, not just its Product
+    Registry entry, so a partial update isn't enough. Returns whether it
+    succeeded."""
+    try:
+        chunks = load_and_chunk_approved_docs(APPROVED_DOCS_DIR)
+        build_index(chunks)
+        rebuild_product_registry(APPROVED_DOCS_DIR)
+    except RetrieverError as e:
+        st.error(f"Saved, but the rebuild failed: {e}. Use Rebuild Index Now on this tab to retry.")
+        return False
+    return True
+
+
 def _render_documents_tab() -> None:
     _render_removal_in_progress_banner()
     _render_rebuild_status()
@@ -298,6 +324,13 @@ def _render_documents_tab() -> None:
     if not doc_paths:
         st.caption("No documents in the knowledge base yet.")
 
+    try:
+        _registry_products, _ = load_product_index()
+    except (FileNotFoundError, OSError):
+        _registry_products = []
+    registry_name_by_file = {p.source_catalogue: p.product_name for p in _registry_products}
+    name_overrides = product_name_overrides.load_overrides()
+
     for doc_path in doc_paths:
         stat = doc_path.stat()
         size_kb = stat.st_size / 1024
@@ -322,6 +355,42 @@ def _render_documents_tab() -> None:
         with col3:
             if st.button("Remove", key=f"remove-{doc_path.name}", width="stretch"):
                 _confirm_remove_dialog(doc_path)
+
+        if current_type == PRODUCT_CATALOGUE:
+            auto_name = registry_name_by_file.get(doc_path.name)
+            override = name_overrides.get(doc_path.name)
+            effective_name = override or auto_name or "not yet in the Product Registry -- rebuild the index"
+            with st.expander(f"Product name: {effective_name}"):
+                if auto_name:
+                    st.caption(f'Auto-detected from the document: "{auto_name}"')
+                new_name = st.text_input(
+                    "Correct the product name if it's wrong",
+                    value=override or "",
+                    placeholder=auto_name or "",
+                    key=f"name-override-{doc_path.name}",
+                )
+                save_col, clear_col = st.columns(2)
+                if save_col.button("Save", key=f"name-save-{doc_path.name}", type="primary", width="stretch"):
+                    new_name = new_name.strip()
+                    if not new_name:
+                        st.error("Enter a product name.")
+                    else:
+                        old_name = override or auto_name
+                        product_name_overrides.set_override(doc_path.name, new_name)
+                        if old_name and old_name != new_name:
+                            _migrate_product_field_overrides(old_name, new_name)
+                        with st.spinner("Renaming -- rebuilding the index and registry..."):
+                            if _rebuild_after_rename():
+                                st.success(f'Renamed to "{new_name}".')
+                                st.rerun()
+                if override and clear_col.button(
+                    "Reset to auto-detected", key=f"name-clear-{doc_path.name}", width="stretch"
+                ):
+                    product_name_overrides.clear_override(doc_path.name)
+                    with st.spinner("Resetting -- rebuilding the index and registry..."):
+                        if _rebuild_after_rename():
+                            st.success("Reset to the auto-detected name.")
+                            st.rerun()
 
         # A plain-text edit box for a .md document -- e.g. tactics/
         # framework reference content that's genuinely just prose to

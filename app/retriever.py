@@ -321,12 +321,18 @@ def add_document_to_index(path: str | Path) -> tuple[int, list[str]]:
 
     document = load_document(path)
 
-    existing_names = {
-        m["product_name"]
-        for m in collection.get(include=["metadatas"])["metadatas"]
-        if m.get("product_name")
-    }
-    product_name = assign_product_name_avoiding(document, existing_names)
+    from app.product_name_overrides import load_overrides as load_product_name_overrides
+
+    override = load_product_name_overrides().get(path.name)
+    if override:
+        product_name = override
+    else:
+        existing_names = {
+            m["product_name"]
+            for m in collection.get(include=["metadatas"])["metadatas"]
+            if m.get("product_name")
+        }
+        product_name = assign_product_name_avoiding(document, existing_names)
 
     chunks = [c.to_dict() for c in chunk_document(document, product_name)]
     count = _upsert_chunks(collection, chunks)

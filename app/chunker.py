@@ -184,11 +184,20 @@ def assign_product_name_avoiding(document: dict[str, Any], taken_names: set[str]
 
 def _assign_product_names(documents: list[dict[str, Any]]) -> dict[str, str]:
     """Collision-aware product-name assignment across a batch of documents
-    being (re)indexed together."""
+    being (re)indexed together. An admin correction (see
+    app.product_name_overrides) wins over the auto-derived name for any
+    document it covers."""
+    from app.product_name_overrides import load_overrides as load_product_name_overrides
+
+    overrides = load_product_name_overrides()
     names: dict[str, str] = {}
     for i, document in enumerate(documents):
+        filename = document.get("filename", "unknown")
+        if filename in overrides:
+            names[filename] = overrides[filename]
+            continue
         others = tuple(documents[:i] + documents[i + 1 :])
-        names[document.get("filename", "unknown")] = assign_product_name(document, others)
+        names[filename] = assign_product_name(document, others)
     return names
 
 
