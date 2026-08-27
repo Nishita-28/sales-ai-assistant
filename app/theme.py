@@ -410,6 +410,17 @@ div:has(> [role="listbox"]) {{
 }}
 [data-testid="stExpander"] summary {{ font-weight: 600 !important; color: var(--mnst-ink-500) !important; font-size: 13px !important; }}
 
+/* ---------------- Spinner (cold-start / warm-up messages) ---------------- */
+/* Unstyled, this renders as Streamlit's default white pill with muted gray
+   text -- illegible against this app's dark background image. Matches the
+   card/expander treatment above instead of standing out as an unstyled
+   leftover. */
+[data-testid="stSpinner"] {{
+  background: var(--mnst-surface-solid) !important; border: 2px solid var(--mnst-border) !important;
+  border-radius: 10px !important; padding: 10px 14px !important;
+}}
+[data-testid="stSpinner"] p {{ color: var(--mnst-ink-900) !important; font-weight: 500 !important; }}
+
 /* ---------------- Badges (confidence / risk pills) ---------------- */
 .mnst-badge-row {{ display: flex; gap: 8px; flex-wrap: wrap; margin: 4px 0 2px; }}
 .mnst-badge {{
